@@ -6,6 +6,31 @@
 #   workhorse --clean name                          remove the worktree and branch that `-w name` created
 set -uo pipefail
 
+# Maximum characters in status activity and command summaries.
+readonly SUMMARY_CHARS=60
+# Number of recent commands included in status JSON.
+readonly LAST_CMDS=5
+# Maximum jobs shown by the list command.
+readonly LIST_LIMIT=20
+# Name column width in list output.
+readonly LIST_NAME_WIDTH=30
+# Number of command lines shown by the tail command.
+readonly TAIL_CMDS=8
+# Maximum characters per command line in tail output.
+readonly CMD_CHARS=200
+# Maximum diff stat lines included in reports.
+readonly DIFF_LINES=15
+# Maximum error log lines included in reports.
+readonly LOG_TAIL_LINES=20
+# Seconds to wait for a detached job to start.
+readonly DETACH_WAIT_SECONDS=5
+# Maximum error log lines shown when detach fails.
+readonly DETACH_LOG_TAIL_LINES=10
+# Seconds between detached startup checks.
+readonly DETACH_POLL_SECONDS=0.01
+# Seconds per minute for elapsed and idle durations.
+readonly SECONDS_PER_MINUTE=60
+
 root="${WORKHORSE_HOME:-$HOME/.cache/workhorse}"
 mkdir -p "$root"
 dir="$PWD" name="" mode="" resume=0 model="" effort="" dir_set=0 wt="" detach=0 uncommitted=0
@@ -28,7 +53,8 @@ tree() { local c; for c in $(pgrep -P "$1"); do tree "$c"; done; echo "$1"; }
 # Snapshot the whole working tree (untracked files included) through a throwaway index; the real index is untouched.
 snap() { local idx; idx="$(mktemp)"; rm -f "$idx"
   GIT_INDEX_FILE="$idx" git -C "$1" add -A :/ 2>/dev/null && GIT_INDEX_FILE="$idx" git -C "$1" write-tree; rm -f "$idx"; }
-TESTS='(^|&&|\|\||[;\n])\s*([A-Za-z_][A-Za-z_0-9]*=[^\s]+\s+)*([^\s;&|]*/)?((python[0-9.]*\s+-m\s+)?(pytest|py\.test|unittest)|(npm|pnpm|yarn|bun)\s+(run\s+)?test|vitest|jest|go\s+test|cargo\s+test|ctest|make\s+(check|test)|tox|nox|rspec)(\s|$|[;&|])'
+# Default regular expression identifying test commands.
+readonly TESTS='(^|&&|\|\||[;\n])\s*([A-Za-z_][A-Za-z_0-9]*=[^\s]+\s+)*([^\s;&|]*/)?((python[0-9.]*\s+-m\s+)?(pytest|py\.test|unittest)|(npm|pnpm|yarn|bun)\s+(run\s+)?test|vitest|jest|go\s+test|cargo\s+test|ctest|make\s+(check|test)|tox|nox|rspec)(\s|$|[;&|])'
 COMMAND_JQ='
   def command_body:
     if test("^/bin/(zsh|bash) -lc ") then
@@ -37,11 +63,35 @@ COMMAND_JQ='
     split("\u0027\\\u0027\u0027") | join("\u0027") |
     split("\u0027\"\u0027\"\u0027") | join("\u0027") |
     split("\\\"") | join("\"");
-  def command_display: command_body | (split("\n")[0] // "") | .[:60];
+  def command_display: command_body | (split("\n")[0] // "") | .[:$summary_chars];
   def is_test: command_body | test($tests);
 '
 
+config_file="${XDG_CONFIG_HOME:-$HOME/.config}/workhorse/config"
+if [[ -f "$config_file" ]]; then
+  while IFS='=' read -r key value || [[ -n "$key" ]]; do
+    case "$key" in
+      WORKHORSE_MODEL_CODE|WORKHORSE_MODEL_REVIEW|WORKHORSE_MODEL_OPS|WORKHORSE_EFFORT_CODE|WORKHORSE_EFFORT_REVIEW|WORKHORSE_EFFORT_OPS|WORKHORSE_FAST_MATCH|WORKHORSE_DISABLE_MCP|WORKHORSE_LANG|WORKHORSE_ALLOW_OPS|WORKHORSE_KEEP_DAYS|WORKHORSE_SKIP_SKILLS|WORKHORSE_TEST_PATTERN)
+        [[ ${!key+x} ]] || printf -v "$key" '%s' "$value" ;;
+    esac
+  done < "$config_file"
+fi
+: "${WORKHORSE_MODEL_CODE=gpt-6-astra}" "${WORKHORSE_MODEL_REVIEW=gpt-6-astra}" "${WORKHORSE_MODEL_OPS=gpt-6.1-sol}"
+: "${WORKHORSE_EFFORT_CODE=medium}" "${WORKHORSE_EFFORT_REVIEW=high}" "${WORKHORSE_EFFORT_OPS=high}"
+: "${WORKHORSE_FAST_MATCH=*sol*}" "${WORKHORSE_DISABLE_MCP=node_repl}" "${WORKHORSE_LANG=zh}" "${WORKHORSE_ALLOW_OPS=1}"
+: "${WORKHORSE_KEEP_DAYS=14}" "${WORKHORSE_SKIP_SKILLS=karpathy-guidelines,code-review,diagnosing-bugs,tdd}" "${WORKHORSE_TEST_PATTERN=$TESTS}"
+
 case "${1:-}" in
+  -h)
+    printf '%s\n' \
+      'Usage: workhorse [-C dir | -w name] [-n name] [--code|--review|--ops] [-m model] [-e effort] [--detach]' \
+      '       workhorse -r [name] [--code] [--detach]' \
+      '       workhorse -s [name ...] | -l | -t [name] | -k [name] | --clean name' \
+      'Settings (environment > ~/.config/workhorse/config > default):' \
+      "  WORKHORSE_KEEP_DAYS=$WORKHORSE_KEEP_DAYS  Cleanup age in days" \
+      "  WORKHORSE_SKIP_SKILLS=$WORKHORSE_SKIP_SKILLS  Comma-separated skills; empty omits the rule" \
+      "  WORKHORSE_TEST_PATTERN=$TESTS"
+    exit 0 ;;
   -s)
     shift
     if (( $# == 0 )); then
@@ -78,8 +128,9 @@ case "${1:-}" in
         --arg dir "$(cat "$j/dir.txt" 2>/dev/null)" \
         --arg state "$state" --arg mode "$(cat "$j/mode.txt" 2>/dev/null)" \
         --arg model "$(cat "$j/model.txt" 2>/dev/null)" --arg effort "$(cat "$j/effort.txt" 2>/dev/null)" \
-        --arg report "$report" --arg tests "$TESTS" --argjson started "$started" \
-        --argjson elapsed "$(( (now - started) / 60 ))" --argjson idle "$(( (now - modified) / 60 ))" "$COMMAND_JQ"'
+        --arg report "$report" --arg tests "$WORKHORSE_TEST_PATTERN" --argjson started "$started" \
+        --argjson summary_chars "$SUMMARY_CHARS" --argjson last_cmds "$LAST_CMDS" --argjson seconds_per_minute "$SECONDS_PER_MINUTE" \
+        --argjson elapsed "$(( (now - started) / SECONDS_PER_MINUTE ))" --argjson idle "$(( (now - modified) / SECONDS_PER_MINUTE ))" "$COMMAND_JQ"'
         [.[] | select(.type == "item.completed" and .item.type == "command_execution")] as $commands |
         ([.[] | select(.type == "item.started" and .item.type == "command_execution")] | last) as $last_command |
         ($last_command != null and (any($commands[]; .item.id == $last_command.item.id) | not)) as $busy |
@@ -87,45 +138,45 @@ case "${1:-}" in
         {name: $name, base: $base, round: $round, path: $path, dir: $dir, state: $state, mode: $mode, model: $model, effort: $effort,
          activity: ($items | last | if .type == "file_change" then "Editing " + (.changes[0].path | split("/") | last)
                     elif .type == "command_execution" then (.command // "" | command_display)
-                    elif .type == "agent_message" then (.text // "") else "" end | (split("\n")[0] // "") | .[:60]),
+                    elif .type == "agent_message" then (.text // "") else "" end | (split("\n")[0] // "") | .[:$summary_chars]),
          files: ([.[] | select(.type == "item.completed" and .item.type == "file_change") | .item.changes[].path] | unique | length),
          exit: (if $state == "done" then ($report | capture(" exit=(?<code>-?[0-9]+) ").code | tonumber) else null end),
          started: $started, elapsed_min: $elapsed, idle_min: $idle,
          busy: (if $busy then ($last_command.item.command | command_display) else "" end),
-         busy_min: (if $busy then (($now - ($last_command.workhorse_time // $modified)) / 60 | floor | if . < 0 then 0 else . end) else 0 end),
+         busy_min: (if $busy then (($now - ($last_command.workhorse_time // $modified)) / $seconds_per_minute | floor | if . < 0 then 0 else . end) else 0 end),
          cmds: ($commands | length),
          tests: ([$commands[] | select(.item.command | is_test)] | length),
          tokens: (map(select(.type == "turn.completed") | .usage.input_tokens + .usage.output_tokens) | add // 0),
-         last_cmds: ([.[] | select(.type == "item.started" and .item.type == "command_execution") | .item.command] | .[-5:]),
+         last_cmds: ([.[] | select(.type == "item.started" and .item.type == "command_execution") | .item.command] | .[-$last_cmds:]),
          report: (if $state == "done" then $report else null end)}' < <(jq -c -R 'fromjson? // empty' "$log")
     done | jq -s '.'
     exit 0 ;;
   -l)
-    for d in $(ls -t "$root" | grep -v '^LAST$' | head -20); do
+    for d in $(ls -t "$root" | grep -v '^LAST$' | head -n "$LIST_LIMIT"); do
       j="$root/$d"
       if [[ -f "$j/report.txt" ]]; then st="$(head -1 "$j/report.txt" | cut -d' ' -f3-)"
       elif alive "$j"; then
         if [[ -f "$j/start" ]]; then started=$(cat "$j/start")
         else started=$(perl -e 'print((stat shift)[9])' "$j/codex.log"); fi
-        st="running $(( ($(date +%s) - started) / 60 ))min"
+        st="running $(( ($(date +%s) - started) / SECONDS_PER_MINUTE ))min"
       else st="dead (no report)"; fi
-      printf '%-30s %s\n' "$d" "$st"
+      printf '%-*s %s\n' "$LIST_NAME_WIDTH" "$d" "$st"
     done; exit 0 ;;
   -t)
     j="$(resolve "${2:-$(newest)}")"
     cmds=0 tests=0 log="$j/codex.log"
     if [[ -f "$j/events.jsonl" ]]; then
       log="$j/events.jsonl"
-      jq -r 'select(.type == "item.started" and .item.type == "command_execution") | .item.command' "$log" | tail -n 8 | cut -c1-200
+      jq -r 'select(.type == "item.started" and .item.type == "command_execution") | .item.command' "$log" | tail -n "$TAIL_CMDS" | cut -c"1-$CMD_CHARS"
       cmds=$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$log")
-      tests=$(jq -s --arg tests "$TESTS" "$COMMAND_JQ"'[.[] | select(.type == "item.completed" and .item.type == "command_execution") | select(.item.command | is_test)] | length' "$log")
+      tests=$(jq -s --arg tests "$WORKHORSE_TEST_PATTERN" --argjson summary_chars "$SUMMARY_CHARS" "$COMMAND_JQ"'[.[] | select(.type == "item.completed" and .item.type == "command_execution") | select(.item.command | is_test)] | length' "$log")
     fi
     if [[ -f "$j/start" ]]; then started=$(cat "$j/start")
     else started=$(perl -e 'print((stat shift)[9])' "$j/codex.log"); fi
     now=$(date +%s)
     echo "-- $cmds commands, $tests test runs," \
-         "$(( (now - started) / 60 ))min elapsed," \
-         "last output $(( (now - $(perl -e 'print((stat shift)[9])' "$log")) / 60 ))min ago$(alive "$j" || echo ', not running')"; exit 0 ;;
+         "$(( (now - started) / SECONDS_PER_MINUTE ))min elapsed," \
+         "last output $(( (now - $(perl -e 'print((stat shift)[9])' "$log")) / SECONDS_PER_MINUTE ))min ago$(alive "$j" || echo ', not running')"; exit 0 ;;
   -k)
     j="$(resolve "${2:-$(newest)}")"
     alive "$j" || { echo "not running"; exit 0; }
@@ -143,20 +194,7 @@ while IFS= read -r -d '' j; do
   [[ -f "$j/pid" || -f "$j/finishing" ]] && continue
   [[ -f "$j/worktree.txt" && -e "$(cat "$j/worktree.txt")" ]] && continue
   rm -rf "$j"
-done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -mtime +14 -print0)
-
-config_file="${XDG_CONFIG_HOME:-$HOME/.config}/workhorse/config"
-if [[ -f "$config_file" ]]; then
-  while IFS='=' read -r key value || [[ -n "$key" ]]; do
-    case "$key" in
-      WORKHORSE_MODEL_CODE|WORKHORSE_MODEL_REVIEW|WORKHORSE_MODEL_OPS|WORKHORSE_EFFORT_CODE|WORKHORSE_EFFORT_REVIEW|WORKHORSE_EFFORT_OPS|WORKHORSE_FAST_MATCH|WORKHORSE_DISABLE_MCP|WORKHORSE_LANG|WORKHORSE_ALLOW_OPS)
-        [[ ${!key+x} ]] || printf -v "$key" '%s' "$value" ;;
-    esac
-  done < "$config_file"
-fi
-: "${WORKHORSE_MODEL_CODE=gpt-6-astra}" "${WORKHORSE_MODEL_REVIEW=gpt-6-astra}" "${WORKHORSE_MODEL_OPS=gpt-6.1-sol}"
-: "${WORKHORSE_EFFORT_CODE=medium}" "${WORKHORSE_EFFORT_REVIEW=high}" "${WORKHORSE_EFFORT_OPS=high}"
-: "${WORKHORSE_FAST_MATCH=*sol*}" "${WORKHORSE_DISABLE_MCP=node_repl}" "${WORKHORSE_LANG=zh}" "${WORKHORSE_ALLOW_OPS=1}"
+done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -mtime +"$WORKHORSE_KEEP_DAYS" -print0)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -267,6 +305,11 @@ script_dir="$(cd "$(dirname "$script_path")" && pwd)"
     printf '\n%s\n' "$follow_up"
   else
     blocks="$(< "$script_dir/../prompts/blocks.$WORKHORSE_LANG.md")"
+    if [[ -z "$WORKHORSE_SKIP_SKILLS" ]]; then
+      blocks="$(printf '%s\n' "$blocks" | sed '/{{SKIP_SKILLS}}/d')"
+    else
+      blocks="${blocks//\{\{SKIP_SKILLS\}\}/$WORKHORSE_SKIP_SKILLS}"
+    fi
     blocks="${blocks//\{\{SCOPE\}\}/$scope}"
     blocks="${blocks//\{\{OUT\}\}/$out}"
     printf '\n%s\n' "$blocks"
@@ -298,16 +341,16 @@ touch "$out/finishing"
 sid="$(jq -r 'select(.type == "thread.started") | .thread_id' "$out/events.jsonl")"
 printf '%s\n' "${sid:-$session}" > "$out/session.txt"
 {
-  echo "== $(basename "$out") exit=$rc $mode $model/$effort/$tier $(( ($(date +%s) - start + 59) / 60 ))min" \
+  echo "== $(basename "$out") exit=$rc $mode $model/$effort/$tier $(( ($(date +%s) - start + SECONDS_PER_MINUTE - 1) / SECONDS_PER_MINUTE ))min" \
        "$(jq -sr '[.[] | select(.type == "turn.completed") | .usage] | "tokens=\(map(.input_tokens - (.cached_input_tokens // 0) + .output_tokens) | add // 0) cached=\(map(.cached_input_tokens // 0) | add // 0)"' "$out/events.jsonl") cmds=$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$out/events.jsonl")" \
-       "tests=$(jq -s --arg tests "$TESTS" "$COMMAND_JQ"'[.[] | select(.type == "item.completed" and .item.type == "command_execution") | select(.item.command | is_test)] | length' "$out/events.jsonl")"
+       "tests=$(jq -s --arg tests "$WORKHORSE_TEST_PATTERN" --argjson summary_chars "$SUMMARY_CHARS" "$COMMAND_JQ"'[.[] | select(.type == "item.completed" and .item.type == "command_execution") | select(.item.command | is_test)] | length' "$out/events.jsonl")"
   [[ -n "$session" && -n "$sid" && "$sid" != "$session" ]] && echo "!! resume started a new thread; context did not carry over"
-  (( rc )) && tail -n 20 "$out/codex.log"
+  (( rc )) && tail -n "$LOG_TAIL_LINES" "$out/codex.log"
   cat "$out/final.md" 2>/dev/null; echo
   if (( isgit )) && [[ -n "$pre" ]]; then
     post="$(snap "$dir")"
     if [[ "$pre" == "$post" ]]; then echo "(no file changes)"
-    else git -C "$dir" diff --stat "$pre" "$post" | tail -n 15; fi
+    else git -C "$dir" diff --stat "$pre" "$post" | tail -n "$DIFF_LINES"; fi
   fi
   [[ -n "$wt" ]] && echo "worktree: $dir (branch $branch)"
 } | if (( detach )); then cat > "$out/report.tmp"; else tee "$out/report.tmp"; fi
@@ -321,19 +364,19 @@ if (( detach )); then
     POSIX::setsid();
     for (glob "/dev/fd/*") { m{/(\d+)$}; POSIX::close($1) if $1 > 2; }
     exec @ARGV;
-  ' bash -u -o pipefail -c "$(declare -p dir out session cfg mode model effort tier isgit wt TESTS COMMAND_JQ detach
+  ' bash -u -o pipefail -c "$(declare -p dir out session cfg mode model effort tier isgit wt WORKHORSE_TEST_PATTERN COMMAND_JQ detach SUMMARY_CHARS LOG_TAIL_LINES DIFF_LINES SECONDS_PER_MINUTE
                [[ -n "$wt" ]] && declare -p branch
                (( isgit )) && declare -p pre
                declare -f snap run_job
                echo run_job)" < /dev/null > /dev/null 2>&1 &
-  deadline=$((SECONDS + 5))
+  deadline=$((SECONDS + DETACH_WAIT_SECONDS))
   while [[ ! -f "$out/pid" && ! -f "$out/report.txt" ]]; do
     if (( SECONDS >= deadline )); then
       echo "workhorse: detached job failed to start" >&2
-      [[ -f "$out/codex.log" ]] && tail -n 10 "$out/codex.log" >&2
+      [[ -f "$out/codex.log" ]] && tail -n "$DETACH_LOG_TAIL_LINES" "$out/codex.log" >&2
       exit 1
     fi
-    sleep 0.01
+    sleep "$DETACH_POLL_SECONDS"
   done
   printf 'started %s %s\n' "$(basename "$out")" "$out"
   (( uncommitted )) && printf 'warning: %s uncommitted changes in %s are not in the worktree\n' "$uncommitted" "$main"

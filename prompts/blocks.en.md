@@ -15,7 +15,7 @@ Do not poll remote tasks in a loop: if you need to wait, use one blocking comman
 
 <default_follow_through_policy>
 When something is ambiguous, choose the most direct, low-risk interpretation, proceed, and explain it in one sentence in the report. Stop to ask only when missing information affects correctness or could lead to an irreversible operation.
-The general process skills (karpathy-guidelines, code-review, diagnosing-bugs, tdd) are already covered by these rules, so do not read their SKILL.md; use domain skills as needed.
+The general process skills ({{SKIP_SKILLS}}) are already covered by these rules, so do not read their SKILL.md; use domain skills as needed.
 </default_follow_through_policy>
 
 <compact_output_contract>
