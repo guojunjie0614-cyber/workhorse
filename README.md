@@ -12,9 +12,9 @@ A Claude Code mod that hands coding, review and ops work to Codex the way Claude
 - **Commands that run mid-turn.** `/workhorse-kill [name]`; without a name, kill stops this session's only running job or lists them.
 - **Job families.** A resume of `fix` or of any of its rounds becomes `fix.2`, `fix.3`, …; the band shows `fix #3`, and `-s`/`-t`/`-k` take the base name for the latest round. The report's first line splits tokens into new (`tokens=`) and `cached=`.
 - **No competing delegate.** With `hide_codex_rescue` (default on), the official Codex plugin's `codex:codex-rescue` subagent is not offered, so Claude doesn't pick between two delegation paths.
-- **`workhorse` CLI.** `bin/workhorse` is the engine and works on its own: `workhorse -C dir`, `--review`, `--ops`, `-w name`, `-r [name] [--code]`, `-l`, `-t`, `-s` (JSON status, including `activity`, the latest event in one line, and `files`, the number of changed files), `-k`, `--clean`, `--detach`. The bundled skill teaches Claude both paths.
+- **`workhorse` CLI.** `bin/workhorse` is the engine and works on its own: `workhorse -C dir`, `--review`, `--ops`, `-w name`, `-r [name] [--code]`, `-l`, `-t`, `-s` (JSON status, including `activity`, the latest event in one line, and `files`, the number of changed files), `-k`, `--clean`, `--detach`.
 
-`-s` also includes `cancelled` (boolean: this round was stopped by `-k`), `repeat` (integer: the latest consecutive completed commands with identical raw `command` and `exit_code`, reset by a completed `file_change`; 0 when none), `repeat_cmd` (that command's `command_display`, or `""` when `repeat` is 0), and `family_tokens` (tokens across all rounds of the base job, including this round, summed as input − cached + output, matching reports). Cancelled rounds append ` cancelled` to the report's first line. The existing `tokens` field remains input + output for the current round.
+`-s` also includes `cancelled` (boolean: this round was stopped by `-k`), `repeat` (integer: the latest consecutive completed commands with identical raw `command` and `exit_code`, reset by a completed `file_change`; 0 when none), `repeat_cmd` (that command's `command_display`, or `""` when `repeat` is 0), and `family_tokens` (tokens across all rounds of the base job, including this round, summed as input − cached + output, matching reports). Cancelled rounds append ` cancelled` to the report's first line.
 
 ## Requirements
 
@@ -41,19 +41,13 @@ Set them in `/plugin configure workhorse@workhorse`. Empty strings keep `workhor
 | `effort_code`, `effort_review`, `effort_ops` | `WORKHORSE_EFFORT_CODE`, ... | `medium`, `high`, `high` |
 | `fast_match` | `WORKHORSE_FAST_MATCH` | `*sol*`: matching models run on the Fast tier and default to high effort (`-e` or a resumed job's effort wins) |
 | `disable_mcp` | `WORKHORSE_DISABLE_MCP` | `node_repl` |
-| `lang` | `WORKHORSE_LANG` | `zh`; `en` for English rule blocks, mod UI and notices (empty uses `zh` for the mod) |
 | `allow_ops` | `WORKHORSE_ALLOW_OPS` | `true` |
 | `stall_minutes`, `max_tests` | | `10`, `2` |
 | `command_minutes` | | `20` minutes before warning once per command text; never terminates the command |
 | `repeat_limit` | | `3` consecutive identical command + exit code results before warning once per command text; never terminates the job |
 | `family_tokens_warn` | | `1000000` cumulative family tokens before warning once per job |
-| `poll_seconds` | | `30` seconds between status polls |
-| `done_linger_minutes` | | `3` minutes to show finished jobs while others run |
-| `report_max_chars` | | `6000` report characters per completion notice |
-| `goal_columns` | | `40` terminal columns maximum for job goals |
 | `keep_days` | `WORKHORSE_KEEP_DAYS` | `14` days of job history retained by cleanup |
 | `skip_skills` | `WORKHORSE_SKIP_SKILLS` | `karpathy-guidelines,code-review,diagnosing-bugs,tdd`; unlike other strings, empty is passed through and disables skill skipping |
-| `test_pattern` | `WORKHORSE_TEST_PATTERN` | Empty: use the engine's default test-command pattern |
 | `banned_phrases` | | `baseline,全量测试,full test suite,前后对比,before/after` |
 | `hide_codex_rescue` | | `true` |
 
@@ -63,5 +57,3 @@ Set them in `/plugin configure workhorse@workhorse`. Empty strings keep `workhor
 claude plugin validate . --strict
 claude plugin test
 ```
-
-`tests/bin/codex` is an offline stand-in for `codex exec` that replays `tests/fixtures/events.jsonl`; put it first on `PATH` with a scratch `WORKHORSE_HOME` to exercise `bin/workhorse` without spending tokens.

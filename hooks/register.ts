@@ -1,5 +1,5 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
-import { argv, brief, environment, FRAME_MS, lint, messages, MS_PER_MINUTE, MS_PER_SECOND, panelLines, started, toolLine } from './lib'
+import { argv, brief, environment, DONE_LINGER_MINUTES, FRAME_MS, lint, MESSAGES, MS_PER_MINUTE, MS_PER_SECOND, panelLines, POLL_SECONDS, REPORT_MAX_CHARS, started, toolLine } from './lib'
 import type { Input, Job, PanelTask, Status } from './lib'
 
 // One module instance can serve several sessions, so all UI state is per session.
@@ -38,9 +38,7 @@ async function pollOnce($: EngineInterface, options: PluginOptions) {
 }
 
 async function poll($: EngineInterface, options: PluginOptions, state: SessionState) {
-  const copy = messages(String(options.lang))
-  const lingerMs = Number(options.done_linger_minutes) * MS_PER_MINUTE
-  const reportMaxChars = Number(options.report_max_chars)
+  const lingerMs = DONE_LINGER_MINUTES * MS_PER_MINUTE
   const session = await $.session.id()
   const now = await $.clock.now()
   const owned: [string, Job][] = []
@@ -97,7 +95,7 @@ async function poll($: EngineInterface, options: PluginOptions, state: SessionSt
     try {
       const status = polled.find(s => s.name === job.name)!
       if (status.family_tokens >= Number(options.family_tokens_warn) && !job.warnedFamilyTokens) {
-        const text = copy.familyTokens(job.name, status.family_tokens)
+        const text = MESSAGES.familyTokens(job.name, status.family_tokens)
         await $.ui.toast(text)
         await $.prompt.submit({ text })
         job.warnedFamilyTokens = true
@@ -105,59 +103,58 @@ async function poll($: EngineInterface, options: PluginOptions, state: SessionSt
       }
       if (status.state === 'missing') {
         if (!await $.store.get(key)) continue
-        await $.prompt.submit({ text: copy.missing(job.name) })
+        await $.prompt.submit({ text: MESSAGES.missing(job.name) })
         await $.store.delete(key)
       } else if (status.state === 'done' || status.state === 'dead') {
         const fullReport = status.state === 'done' ? await $.fs.read(`${status.path}/report.txt`) : ''
-        const report = fullReport.slice(0, reportMaxChars) + (fullReport.length > reportMaxChars ? copy.truncated(status.path) : '')
+        const report = fullReport.slice(0, REPORT_MAX_CHARS) + (fullReport.length > REPORT_MAX_CHARS ? MESSAGES.truncated(status.path) : '')
         const reminder = status.cancelled
-          ? copy.cancelledReminder(job.name)
+          ? MESSAGES.cancelledReminder(job.name)
           : status.state === 'dead'
-          ? copy.deadReminder(job.name)
+          ? MESSAGES.deadReminder(job.name)
           : status.mode === 'review'
-            ? copy.reviewReminder(status.base)
+            ? MESSAGES.reviewReminder(status.base)
             : status.mode === 'ops'
-              ? copy.opsReminder
-              : copy.codeReminder(job.doneWhen, status.base)
+              ? MESSAGES.opsReminder
+              : MESSAGES.codeReminder(job.doneWhen, status.base)
         if (!await $.store.get(key)) continue
-        await $.prompt.submit({ text: copy.finished(job.name, report, reminder) })
+        await $.prompt.submit({ text: MESSAGES.finished(job.name, report, reminder) })
         await $.store.delete(key)
       } else if (status.state === 'running') {
         if (status.repeat >= Number(options.repeat_limit) && !job.warnedRepeat?.includes(status.repeat_cmd)) {
-          const text = copy.repeated(job.name, status.repeat, status.repeat_cmd)
+          const text = MESSAGES.repeated(job.name, status.repeat, status.repeat_cmd)
           await $.ui.toast(text)
           await $.prompt.submit({ text })
           job.warnedRepeat = [...(job.warnedRepeat ?? []), status.repeat_cmd]
           await $.store.set(key, job)
         }
         if (status.busy && status.busy_min >= Number(options.command_minutes) && job.warnedBusy !== status.busy) {
-          const text = copy.longCommand(job.name, status.busy_min, status.busy)
+          const text = MESSAGES.longCommand(job.name, status.busy_min, status.busy)
           await $.ui.toast(text)
           await $.prompt.submit({ text })
           job.warnedBusy = status.busy
         }
         if (!status.busy && status.idle_min >= Number(options.stall_minutes) && !job.warnedStall) {
           job.warnedStall = true
-          const text = copy.stalled(job.name, status.idle_min)
+          const text = MESSAGES.stalled(job.name, status.idle_min)
           await $.ui.toast(text)
           void $.prompt.submit({ text })
         }
         if (status.tests > Number(options.max_tests) && !job.warnedTests) {
           job.warnedTests = true
-          const text = copy.excessTests(job.name, status.tests, Number(options.max_tests))
+          const text = MESSAGES.excessTests(job.name, status.tests, Number(options.max_tests))
           await $.ui.toast(text)
           void $.prompt.submit({ text })
         }
         if (await $.store.get(key)) await $.store.set(key, job)
       }
     } catch (error) {
-      await $.ui.toast(copy.statusError(job.name, String(error)))
+      await $.ui.toast(MESSAGES.statusError(job.name, String(error)))
     }
   }
 }
 
 export const register: Register = (on, options) => {
-  const copy = messages(String(options.lang))
   on('agent.offer', ($, e, next) => {
     if (options.hide_codex_rescue && e.agent === 'codex:codex-rescue') return { isOffered: false }
     return next(e)
@@ -167,26 +164,26 @@ export const register: Register = (on, options) => {
     sessionState(await $.session.id(), true)
     await $.tool.register({
       name: 'run',
-      description: copy.runDescription,
+      description: MESSAGES.runDescription,
       inputSchema: {
         type: 'object',
         properties: {
           goal: { type: 'string' }, context: { type: 'string' }, done_when: { type: 'string' },
           constraints: { type: 'string' }, mode: { type: 'string', enum: ['code', 'review', 'ops'], default: 'code' },
           dir: { type: 'string' }, worktree: { type: 'string' }, name: { type: 'string' }, resume: { type: 'string' },
-          to_code: { type: 'boolean' }, effort: { type: 'string', description: copy.effortDescription }, model: { type: 'string' },
+          to_code: { type: 'boolean' }, effort: { type: 'string', description: MESSAGES.effortDescription }, model: { type: 'string' },
         },
         required: ['goal', 'context', 'done_when'],
       },
     })
-    await $.command.register({ name: 'workhorse-kill', description: copy.killDescription, argumentHint: copy.killArgumentHint, immediate: true })
-    $.clock.every(Number(options.poll_seconds) * MS_PER_SECOND, () => pollOnce($, options))
+    await $.command.register({ name: 'workhorse-kill', description: MESSAGES.killDescription, argumentHint: MESSAGES.killArgumentHint, immediate: true })
+    $.clock.every(POLL_SECONDS * MS_PER_SECOND, () => pollOnce($, options))
     return next(e)
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const now = await $.clock.now()
-    const lines = panelLines(sessionState(await $.session.id()).statuses, now, options, e.props.bodyColumns)
+    const lines = panelLines(sessionState(await $.session.id()).statuses, now, e.props.bodyColumns)
     if (!lines.length) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     return Box({ flexDirection: 'column', children: lines.map(line => Text({ wrap: 'truncate-end', children: line.map(segment => Text({ color: 'text', ...segment })) })) })
@@ -195,7 +192,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
     if (e.props.tool !== 'mcp__workhorse__run') return next(e)
     const { Text } = $.ui.resolve(e)
-    return Text({ color: 'text', wrap: 'truncate-end', children: toolLine(e.props.input as Input, String(options.lang)) })
+    return Text({ color: 'text', wrap: 'truncate-end', children: toolLine(e.props.input as Input) })
   })
 
   on('tool.check', { tool: 'mcp__workhorse__run' }, async ($, e) => {
@@ -211,14 +208,14 @@ export const register: Register = (on, options) => {
       }
     }
     return mode === 'ops'
-      ? { decision: 'ask', reason: copy.opsPermission }
+      ? { decision: 'ask', reason: MESSAGES.opsPermission }
       : { decision: 'allow' }
   })
 
   on('tool.call', { tool: 'mcp__workhorse__run' }, async ($, e) => {
     const { tool, tool_use_id, agentId, ...args } = e
     const input = args as Input
-    const deny = lint(input, String(options.banned_phrases), String(options.lang))
+    const deny = lint(input, String(options.banned_phrases))
     if (deny) return { deny }
     const cwd = input.dir || await $.session.cwd()
     const result = await $.process.run(argv($.plugin.root, input, cwd), { cwd, env: environment(options), stdin: brief(input) })
@@ -228,7 +225,7 @@ export const register: Register = (on, options) => {
     void pollOnce($, options)
     const lines = result.stdout.split('\n')
     const warnings = lines.slice(lines.findIndex(line => line.startsWith('started ')) + 1).filter(line => line.startsWith('warning:'))
-    return { result: [copy.launched(job.name), ...warnings].join('\n') }
+    return { result: [MESSAGES.launched(job.name), ...warnings].join('\n') }
   })
 
   on('command.run', { command: 'workhorse-kill' }, async ($, e) => {
@@ -241,11 +238,11 @@ export const register: Register = (on, options) => {
         const job = await $.store.get(key) as Job
         if (job.session === session) names.push(job.name)
       }
-      if (!names.length) return { text: copy.noRunning }
+      if (!names.length) return { text: MESSAGES.noRunning }
       const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-s', ...names], { env: environment(options) })
       const running = (JSON.parse(result.stdout) as Status[]).filter(status => status.state === 'running')
-      if (!running.length) return { text: copy.noRunning }
-      if (running.length > 1) return { text: copy.multipleRunning(running.map(status => status.name)) }
+      if (!running.length) return { text: MESSAGES.noRunning }
+      if (running.length > 1) return { text: MESSAGES.multipleRunning(running.map(status => status.name)) }
       name = running[0]!.name
     }
     const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-k', name], { env: environment(options) })

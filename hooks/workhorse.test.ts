@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { argv, brief, lint, MESSAGES, panelLines } from './lib'
+import { argv, brief, DONE_LINGER_MINUTES, GOAL_COLUMNS, lint, MESSAGES, MS_PER_MINUTE, MS_PER_SECOND, panelLines, POLL_SECONDS, REPORT_MAX_CHARS } from './lib'
 import type { PanelTask } from './lib'
 
 test('hides codex-rescue and passes other agents through', async ($, on) => {
@@ -36,11 +36,11 @@ test('running band refreshes elapsed seconds without stop or logs buttons', asyn
   on('process.run', ($, e) => {
     calls.push([...e.argv])
     return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify([
-      { name: 'patch', base: 'patch', round: 1, busy: '', busy_min: 0, path: '/jobs/patch', state: 'running', mode: 'code', started: 0, elapsed_min: 0, cmds: 4, tests: 1, idle_min: 2, activity: 'Editing parser', files: 2, step: 1, steps: 2 },
+      { name: 'patch', base: 'patch', round: 1, busy: '', busy_min: 0, path: '/jobs/patch', state: 'running', mode: 'code', started: 0, cmds: 4, tests: 1, idle_min: 2, activity: 'Editing parser', files: 2, step: 1, steps: 2 },
     ]) } }
   })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  await clock.advance(30000)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   const ui = await $.ui.mount({ plugin: 'workhorse', component: 'AbovePrompt', surface: 'terminal', requestId: 'band', props: {
     hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {},
   } })
@@ -52,7 +52,7 @@ test('running band refreshes elapsed seconds without stop or logs buttons', asyn
   await ui.unmount()
 })
 
-test('panel follows events live and disappears once every job is done', { options: { lang: 'en', done_linger_minutes: 0.01 } }, async ($, on) => {
+test('panel follows events live and disappears once every job is done', async ($, on) => {
   const { clock, store } = setup(on)
   on('fs.exists', () => ({ value: false }))
   let mtime = 1
@@ -69,7 +69,7 @@ test('panel follows events live and disappears once every job is done', { option
   on('fs.read', () => ({ value: 'Fixed parser' }))
   on('prompt.submit', ($, e) => ({ text: e.text }))
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  await clock.advance(30000)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   const ui = await $.ui.mount({ plugin: 'workhorse', component: 'AbovePrompt', surface: 'terminal', requestId: 'progress', props: {
     hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {},
   } })
@@ -80,7 +80,7 @@ test('panel follows events live and disappears once every job is done', { option
   mtime = 2
   await clock.advance(250)
   expect(await ui.find({ type: 'Text', text: '│    rg -n parse src · 4 cmds · 2 files' })).toBeDefined()
-  await clock.advance(250)
+  await clock.advance(DONE_LINGER_MINUTES * MS_PER_MINUTE - 500)
   expect(await ui.find({ type: 'Text', text: '1 agents · 1 running · 0 done' })).toBeDefined()
   done = true
   mtime = 3
@@ -90,7 +90,7 @@ test('panel follows events live and disappears once every job is done', { option
   await ui.unmount()
 })
 
-test('a session sees only its own jobs in the band', { options: { lang: 'en' } }, async ($, on) => {
+test('a session sees only its own jobs in the band', async ($, on) => {
   const { clock, store, session } = setup(on)
   on('fs.exists', () => ({ value: false }))
   on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: 1, isLink: false } }))
@@ -98,7 +98,7 @@ test('a session sees only its own jobs in the band', { options: { lang: 'en' } }
   store['job:/jobs/mine'] = { name: 'mine', session: 'session-1', goal: 'fix parser', doneWhen: 'unit test', warnedStall: false, warnedTests: false }
   on('process.run', () => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify([{ name: 'mine', base: 'mine', round: 1, busy: '', busy_min: 0, path: '/jobs/mine', state: 'running', mode: 'code', started: 0, cmds: 1, tests: 0, idle_min: 0, activity: 'x', files: 0 }]) } }))
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  await clock.advance(30000)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   const props = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} }
   const mine = await $.ui.mount({ plugin: 'workhorse', component: 'AbovePrompt', surface: 'terminal', requestId: 'mine', props })
   expect(await mine.find({ type: 'Text', text: '1 agents · 1 running · 0 done' })).toBeDefined()
@@ -138,7 +138,7 @@ test('lint refuses absent completion criteria and banned phrases in instruction 
   expect(lint({ goal: 'notable baseline', context: '', done_when: 'unit test' }, 'baseline')).toContain('goal')
 })
 
-test('launch writes argv, stdin and job; completion delivers report and acceptance command', { options: { lang: 'en', poll_seconds: 1, report_max_chars: 6, keep_days: 7, skip_skills: '', test_pattern: 'unit' } }, async ($, on) => {
+test('launch writes argv, stdin and job; completion delivers report and acceptance command', { options: { keep_days: 7, skip_skills: '' } }, async ($, on) => {
   const { clock, store } = setup(on)
   const calls: unknown[] = []
   const messages: string[] = []
@@ -148,9 +148,10 @@ test('launch writes argv, stdin and job; completion delivers report and acceptan
       ? 'started patch /jobs/patch\n'
       : JSON.stringify([{ name: 'patch', path: '/jobs/patch', state: 'done' }]) } }
   })
+  const report = '修'.repeat(REPORT_MAX_CHARS) + '完整报告末尾'
   on('fs.read', ($, e) => {
     expect(e.path).toBe('/jobs/patch/report.txt')
-    return { value: 'Fixed the parser' }
+    return { value: report }
   })
   on('prompt.submit', ($, e) => { messages.push(e.text); return { text: e.text } })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
@@ -159,7 +160,7 @@ test('launch writes argv, stdin and job; completion delivers report and acceptan
   expect(result.result).toContain('patch')
   expect(calls[0]).toEqual({
     argv: [expect.stringMatching(/\/bin\/workhorse$/), '--detach', '-C', '/repo', '--code', '-n', 'patch', '-e', 'xhigh', '-m', 'codex'],
-    init: { cwd: '/repo', env: { WORKHORSE_ALLOW_OPS: '1', WORKHORSE_LANG: 'en', WORKHORSE_KEEP_DAYS: '7', WORKHORSE_SKIP_SKILLS: '', WORKHORSE_TEST_PATTERN: 'unit' }, stdin: 'Goal: fix parser\nContext: baseline.ts rejects input\nConstraints: only parser\nDone when: npm run test:parser' },
+    init: { cwd: '/repo', env: { WORKHORSE_ALLOW_OPS: '1', WORKHORSE_KEEP_DAYS: '7', WORKHORSE_SKIP_SKILLS: '' }, stdin: 'Goal: fix parser\nContext: baseline.ts rejects input\nConstraints: only parser\nDone when: npm run test:parser' },
   })
   expect(store).toEqual({ 'job:/jobs/patch': { name: 'patch', session: 'session-1', goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false } })
   expect(argv('/plugin', { ...input, resume: 'review', to_code: true }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-r', 'review', '--code', '-e', 'xhigh', '-m', 'codex'])
@@ -167,20 +168,21 @@ test('launch writes argv, stdin and job; completion delivers report and acceptan
     expect(argv('/plugin', { goal: 'fix', context: '', done_when: 'unit test', resume: 'job', mode, to_code: true }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-r', 'job', `--${mode}`])
   }
   expect(argv('/plugin', { ...input, worktree: 'branch', mode: 'review' }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-w', 'branch', '--review', '-n', 'patch', '-e', 'xhigh', '-m', 'codex'])
-  await clock.advance(1000)
-  expect(calls[1]).toEqual({ argv: [expect.stringMatching(/\/bin\/workhorse$/), '-s', 'patch'], init: { env: { WORKHORSE_ALLOW_OPS: '1', WORKHORSE_LANG: 'en', WORKHORSE_KEEP_DAYS: '7', WORKHORSE_SKIP_SKILLS: '', WORKHORSE_TEST_PATTERN: 'unit' } } })
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
+  expect(calls[1]).toEqual({ argv: [expect.stringMatching(/\/bin\/workhorse$/), '-s', 'patch'], init: { env: { WORKHORSE_ALLOW_OPS: '1', WORKHORSE_KEEP_DAYS: '7', WORKHORSE_SKIP_SKILLS: '' } } })
   expect(messages).toHaveLength(1)
-  expect(messages[0]).toContain('workhorse: job patch finished\nFixed \nTruncated; full report: /jobs/patch/report.txt')
+  expect(messages[0]).toContain(`workhorse: job patch 已结束\n${report.slice(0, REPORT_MAX_CHARS)}\n已截断，完整报告见 /jobs/patch/report.txt`)
+  expect(messages[0]).not.toContain('完整报告末尾')
   expect(messages[0]).toContain(input.done_when)
   expect(store).toEqual({})
   expect(brief({ goal: 'fix', context: 'baseline.ts', done_when: 'unit test' })).toBe('Goal: fix\nContext: baseline.ts\nDone when: unit test')
-  expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { mode: 'ops' } })).toEqual({ decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' })
+  expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { mode: 'ops' } })).toEqual({ decision: 'ask', reason: 'ops 任务让 Codex 在仓库外以完整权限运行' })
 })
 
-test('resuming an ops job asks first unless it becomes a code job', { options: { lang: 'en' } }, async ($, on) => {
+test('resuming an ops job asks first unless it becomes a code job', async ($, on) => {
   setup(on)
   on('process.run', ($, e) => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify([{ name: e.argv[2], mode: e.argv[2] === 'deploy' ? 'ops' : 'code' }]) } }))
-  const ask = { decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' }
+  const ask = { decision: 'ask', reason: 'ops 任务让 Codex 在仓库外以完整权限运行' }
   expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { resume: 'deploy' } })).toEqual(ask)
   expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { resume: 'deploy', to_code: true } })).toEqual({ decision: 'allow' })
   expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { resume: 'deploy', mode: 'review' } })).toEqual({ decision: 'allow' })
@@ -195,12 +197,12 @@ test('stall and excess-test warnings each notify only once', async ($, on) => {
   let busy = 'sleep 600'
   on('process.run', ($, e) => ({ value: { exitCode: 0, stderr: '', stdout: e.argv[1] === '--detach'
     ? 'started slow /jobs/slow\n'
-    : JSON.stringify([{ name: 'slow', path: '/jobs/slow', state: 'running', elapsed_min: 12, idle_min: 10, busy, busy_min: 10, tests: busy ? 0 : 3 }]) } }))
+    : JSON.stringify([{ name: 'slow', path: '/jobs/slow', state: 'running', idle_min: 10, busy, busy_min: 10, tests: busy ? 0 : 3 }]) } }))
   on('prompt.submit', ($, e) => { messages.push(e.text); return { text: e.text } })
   on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
   await $.tool.call({ tool: 'mcp__workhorse__run', goal: 'fix', context: '', done_when: 'unit test' })
-  await clock.advance(30000)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   expect(messages).toHaveLength(0)
   expect(toasts).toHaveLength(0)
   busy = ''
@@ -227,7 +229,7 @@ test('long commands warn once per command text without terminating', { options: 
   on('prompt.submit', ($, e) => { messages.push(e.text); return { text: e.text } })
   on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  await clock.advance(30000)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   expect(messages).toHaveLength(0)
   busyMinutes = 2
   await clock.advance(60000)
@@ -260,11 +262,11 @@ test('failed completion submissions keep records until the next successful poll'
   })
   on('ui.toast', () => ({ value: undefined }))
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  await clock.advance(30000)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   expect(Object.keys(store)).toEqual(states.map(name => `job:/jobs/${name}`))
   expect(messages).toHaveLength(0)
   fail = false
-  await clock.advance(30000)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   expect(messages).toHaveLength(3)
   expect(store).toEqual({})
 })
@@ -287,7 +289,7 @@ test('missing jobs are removed and a failed job does not block other jobs', asyn
   on('prompt.submit', ($, e) => { messages.push(e.text); return { text: e.text } })
   on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  await clock.advance(30000)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   expect(messages).toHaveLength(2)
   expect(messages[0]).toContain('job lost 记录已丢失')
   expect(messages[1]).toContain('Ready report')
@@ -311,8 +313,8 @@ test('two polls sharing a store submit a done review job only once', async ($, o
     return { text: e.text }
   })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  await clock.advance(30000)
-  await clock.advance(30000)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   expect(messages).toHaveLength(1)
   expect(messages[0]).toContain('核对结论和证据；要修复就用 resume review + to_code 交回')
   expect(messages[0]).not.toContain('自己运行')
@@ -320,15 +322,16 @@ test('two polls sharing a store submit a done review job only once', async ($, o
 })
 
 test('panel shows failed exits, family rounds and busy commands', () => {
-  const task: PanelTask = { name: 'patch.2', base: 'patch', round: 2, busy: 'sleep 600', busy_min: 10, path: '/jobs/patch.2', state: 'running', mode: 'code', exit: null, started: 0, elapsed_min: 10, idle_min: 10, cmds: 4, activity: 'Editing parser', files: 2, tests: 0, tokens: 0, cancelled: false, repeat: 0, repeat_cmd: '', family_tokens: 0, report: '', goal: 'fix' }
+  const task: PanelTask = { name: 'patch.2', base: 'patch', round: 2, busy: 'sleep 600', busy_min: 10, path: '/jobs/patch.2', state: 'running', mode: 'code', exit: null, started: 0, idle_min: 10, cmds: 4, activity: 'Editing parser', files: 2, tests: 0, cancelled: false, repeat: 0, repeat_cmd: '', family_tokens: 0, goal: 'x'.repeat(GOAL_COLUMNS + 1) }
   const lines = panelLines([
     task,
     { ...task, name: 'failed', base: 'failed', round: 1, state: 'done', exit: 1, busy: '' },
     { ...task, name: 'ok', base: 'ok', round: 1, state: 'done', exit: 0, busy: '' },
     { ...task, name: 'dead', base: 'dead', round: 1, state: 'dead', busy: '' },
-  ], 600000, { lang: 'en', done_linger_minutes: 3, goal_columns: 40 })
+  ], 600000)
   expect(lines[1]![0]!.children).toBe('4 agents · 1 running · 1 done · 2 failed')
   expect(lines[2]![2]!.children).toContain('patch #2')
+  expect(lines[2]![2]!.children).toContain('x'.repeat(GOAL_COLUMNS - 1) + '…')
   expect(lines[3]![0]!.children).toContain('running 10m: sleep 600')
   expect(lines[4]![1]).toEqual({ children: '✗', color: 'error' })
   expect(lines[4]![2]!.children).not.toContain('#1')
@@ -378,22 +381,22 @@ test('repeated commands warn at the configured limit once per command without ki
   on('prompt.submit', ($, e) => { messages.push(e.text); return { text: e.text } })
   on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  await clock.advance(30000)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   expect(messages).toHaveLength(0)
   repeat = 4
   await clock.advance(60000)
   expect(messages).toHaveLength(1)
   expect(messages[0]).toContain('4 次：check a')
   command = 'check b'
-  await clock.advance(30000)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   command = 'check a'
-  await clock.advance(30000)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   expect(messages).toHaveLength(2)
   expect(toasts).toEqual(messages)
   expect(store['job:/jobs/loop']).toMatchObject({ warnedRepeat: ['check a', 'check b'] })
 })
 
-test('family tokens warn once per job at the configured threshold including completion', { options: { family_tokens_warn: 100, lang: 'en' } }, async ($, on) => {
+test('family tokens warn once per job at the configured threshold including completion', { options: { family_tokens_warn: 100 } }, async ($, on) => {
   const { clock, store } = setup(on)
   for (const name of ['one', 'two']) store[`job:/jobs/${name}`] = { name, session: 'session-1', goal: 'fix', doneWhen: 'unit test' }
   let tokens = 99
@@ -406,34 +409,34 @@ test('family tokens warn once per job at the configured threshold including comp
   on('prompt.submit', ($, e) => { messages.push(e.text); return { text: e.text } })
   on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  await clock.advance(30000)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   expect(messages).toHaveLength(0)
   tokens = 100
   await clock.advance(60000)
   expect(toasts).toHaveLength(2)
-  expect(toasts[0]).toContain('job one family has used 100 tokens')
-  expect(toasts[1]).toContain('job two family has used 100 tokens')
+  expect(toasts[0]).toContain('job one 家族累计已使用 100 token')
+  expect(toasts[1]).toContain('job two 家族累计已使用 100 token')
   expect(messages).toHaveLength(3)
   expect(store['job:/jobs/one']).toMatchObject({ warnedFamilyTokens: true })
 })
 
 test('cancelled jobs use inactive state and cancellation reminders instead of failed counts', async ($, on) => {
   const { clock, store } = setup(on)
-  const task: PanelTask = { name: 'cancel', base: 'cancel', round: 1, path: '/jobs/cancel', state: 'done', cancelled: true, exit: 1, mode: 'code', started: 0, elapsed_min: 0, idle_min: 0, busy: '', busy_min: 0, cmds: 0, activity: '', files: 0, tests: 0, tokens: 0, family_tokens: 0, repeat: 0, repeat_cmd: '', report: '', goal: 'fix' }
-  const lines = panelLines([task, { ...task, name: 'live', state: 'running', cancelled: false }], 30000, { lang: 'en', done_linger_minutes: 3, goal_columns: 40 })
+  const task: PanelTask = { name: 'cancel', base: 'cancel', round: 1, path: '/jobs/cancel', state: 'done', cancelled: true, exit: 1, mode: 'code', started: 0, idle_min: 0, busy: '', busy_min: 0, cmds: 0, activity: '', files: 0, tests: 0, family_tokens: 0, repeat: 0, repeat_cmd: '', goal: 'fix' }
+  const lines = panelLines([task, { ...task, name: 'live', state: 'running', cancelled: false }], 30000)
   expect(lines[1]![0]!.children).toBe('2 agents · 1 running · 0 done · 1 cancelled')
   expect(lines[2]![3]).toEqual({ children: 'cancelled', color: 'inactive' })
   expect(lines[2]![1]!.color).toBe('inactive')
-  expect(MESSAGES.en.cancelledReminder('cancel')).toContain('Job cancelled')
+  expect(MESSAGES.cancelledReminder('cancel')).toContain('任务已取消')
   store['job:/jobs/cancel'] = { name: 'cancel', session: 'session-1', goal: 'fix', doneWhen: 'unit test' }
   on('process.run', () => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify([task]) } }))
   on('fs.read', () => ({ value: 'Stopped report' }))
   const messages: string[] = []
   on('prompt.submit', ($, e) => { messages.push(e.text); return { text: e.text } })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  await clock.advance(30000)
+  await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   expect(messages).toHaveLength(1)
-  expect(messages[0]).toContain(MESSAGES.zh.cancelledReminder('cancel'))
+  expect(messages[0]).toContain(MESSAGES.cancelledReminder('cancel'))
   expect(messages[0]).not.toContain('自己运行')
   expect(store).toEqual({})
 })
