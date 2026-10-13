@@ -2,23 +2,20 @@ import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 import { argv, brief, environment, jobRows, lint, panelLines, started, toolLine } from './lib'
 import type { Input, Job, PanelTask, Status } from './lib'
 
-let recentJobs: { name: string; label: string }[] = []
-let selectedJob = ''
-let jobOutput = ''
-
 async function refreshPane($: EngineInterface, options: PluginOptions) {
+  const state = sessionState(await $.session.id())
   const list = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-l'], { env: environment(options) })
-  recentJobs = jobRows(list.stdout)
-  if (!selectedJob && recentJobs.length) selectedJob = recentJobs[0]!.name
-  jobOutput = list.stderr
-  if (selectedJob) {
-    const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-s', selectedJob], { env: environment(options) })
+  state.recentJobs = jobRows(list.stdout)
+  if (!state.selectedJob && state.recentJobs.length) state.selectedJob = state.recentJobs[0]!.name
+  state.jobOutput = list.stderr
+  if (state.selectedJob) {
+    const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-s', state.selectedJob], { env: environment(options) })
     const [status] = JSON.parse(result.stdout) as Status[]
     if (status!.state === 'done') {
-      jobOutput = await $.fs.read(`${status!.path}/report.txt`)
+      state.jobOutput = await $.fs.read(`${status!.path}/report.txt`)
     } else {
-      const log = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-t', selectedJob], { env: environment(options) })
-      jobOutput = log.stdout + log.stderr
+      const log = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-t', state.selectedJob], { env: environment(options) })
+      state.jobOutput = log.stdout + log.stderr
     }
   }
   $.ui.invalidate('ui.render')
@@ -31,15 +28,15 @@ async function openPane($: EngineInterface, options: PluginOptions) {
   return text
 }
 
-// One module instance can serve several sessions, so all band state is per session.
-type SessionState = { statuses: PanelTask[]; ticking?: { cancel: () => void }; polling: boolean; pollAgain: boolean; seen: Map<string, string> }
+// One module instance can serve several sessions, so all UI state is per session.
+type SessionState = { statuses: PanelTask[]; ticking?: { cancel: () => void }; polling: boolean; pollAgain: boolean; seen: Map<string, string>; recentJobs: { name: string; label: string }[]; selectedJob: string; jobOutput: string }
 const sessions = new Map<string, SessionState>()
 
 function sessionState(id: string, reset = false): SessionState {
   let state = sessions.get(id)
   if (reset) state?.ticking?.cancel()
   if (!state || reset) {
-    state = { statuses: [], polling: false, pollAgain: false, seen: new Map() }
+    state = { statuses: [], polling: false, pollAgain: false, seen: new Map(), recentJobs: [], selectedJob: '', jobOutput: '' }
     sessions.set(id, state)
   }
   return state
@@ -127,17 +124,20 @@ async function poll($: EngineInterface, options: PluginOptions, state: SessionSt
         await $.store.delete(key)
         void $.prompt.submit({ text: `workhorse: job ${job.name} 记录已丢失` })
       } else if (status.state === 'done' || status.state === 'dead') {
-        const report = status.state === 'done' ? (await $.fs.read(`${key.slice(4)}/report.txt`)).slice(0, 6000) : ''
+        const fullReport = status.state === 'done' ? await $.fs.read(`${status.path}/report.txt`) : ''
+        const report = fullReport.slice(0, 6000) + (fullReport.length > 6000 ? `\n已截断，完整报告见 ${status.path}/report.txt` : '')
         const reminder = status.state === 'dead'
           ? `用 workhorse -t ${job.name} 看日志`
           : status.mode === 'review'
-            ? '核对结论和证据；要修复就用 resume + to_code 交回'
-            : `对照 brief 读 diff，自己运行 ${job.doneWhen}；要修复就用 mcp__workhorse__run 工具 resume ${job.name} 交回`
+            ? `核对结论和证据；要修复就用 resume ${status.base} + to_code 交回`
+            : status.mode === 'ops'
+              ? '核对产物和远端状态，不要重复执行部署'
+              : `对照 brief 读 diff，自己运行 ${job.doneWhen}；要修复就用 mcp__workhorse__run 工具 resume ${status.base} 交回`
         if (!await $.store.get(key)) continue
         await $.store.delete(key)
         void $.prompt.submit({ text: `workhorse: job ${job.name} finished\n${report}\n${reminder}` })
       } else if (status.state === 'running') {
-        if (status.idle_min >= Number(options.stall_minutes) && !job.warnedStall) {
+        if (!status.busy && status.idle_min >= Number(options.stall_minutes) && !job.warnedStall) {
           job.warnedStall = true
           const text = `workhorse: job ${job.name} 已 ${status.idle_min} 分钟无输出，用 workhorse -t ${job.name} 查看，卡住就 workhorse -k ${job.name} 后把 brief 缩小重派`
           await $.ui.toast(text)
@@ -187,14 +187,15 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const now = await $.clock.now()
-    const lines = panelLines(sessionState(await $.session.id()).statuses, now)
+    const lines = panelLines(sessionState(await $.session.id()).statuses, now, e.props.bodyColumns)
     if (!lines.length) return next(e)
     const { Box, Text } = $.ui.resolve(e)
-    return Box({ flexDirection: 'column', children: lines.map(line => Text({ children: line.map(segment => Text({ color: 'text', ...segment })) })) })
+    return Box({ flexDirection: 'column', children: lines.map(line => Text({ wrap: 'truncate-end', children: line.map(segment => Text({ color: 'text', ...segment })) })) })
   })
 
-  on('ui.render', { component: 'Pane' }, ($, e, next) => {
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== 'workhorse') return next(e)
+    const { recentJobs, selectedJob, jobOutput } = sessionState(await $.session.id())
     const { Box, Text, Button } = $.ui.resolve(e)
     return Box({ flexDirection: 'column', children: [
       ...recentJobs.map(job => Button({ key: `select:${job.name}`, label: `${job.name === selectedJob ? '▸ ' : ''}${job.label}`, onPress: () => {} })),
@@ -214,7 +215,7 @@ export const register: Register = (on, options) => {
 
   on('ui.press', { plugin: 'workhorse' }, async ($, e, next) => {
     if (e.element.startsWith('select:')) {
-      selectedJob = e.element.slice(7)
+      sessionState(await $.session.id()).selectedJob = e.element.slice(7)
       await refreshPane($, options)
     } else if (e.element === 'refresh') {
       await refreshPane($, options)
@@ -226,12 +227,17 @@ export const register: Register = (on, options) => {
 
   on('tool.check', { tool: 'mcp__workhorse__run' }, async ($, e) => {
     const input = e.input as Input
-    let ops = input.mode === 'ops'
-    if (!ops && input.resume && !input.mode && !input.to_code) {
+    let mode: string | undefined = input.mode ?? (input.to_code ? 'code' : undefined)
+    if (!mode && input.resume) {
+      // Fail closed: when the resumed job's mode can't be read, ask as for ops.
       const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-s', input.resume], { env: environment(options) })
-      ops = result.exitCode === 0 && (JSON.parse(result.stdout) as Status[])[0]?.mode === 'ops'
+      try {
+        mode = (JSON.parse(result.stdout) as Status[])[0]?.mode ?? 'ops'
+      } catch {
+        mode = 'ops'
+      }
     }
-    return ops
+    return mode === 'ops'
       ? { decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' }
       : { decision: 'allow' }
   })
@@ -247,14 +253,32 @@ export const register: Register = (on, options) => {
     const job = started(result.stdout)
     await $.store.set(`job:${job.path}`, { name: job.name, session: await $.session.id(), goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false })
     void pollOnce($, options)
-    return { result: `started ${job.name}; 报告会以 workhorse 消息送达，不要轮询。` }
+    const lines = result.stdout.split('\n')
+    const warnings = lines.slice(lines.findIndex(line => line.startsWith('started ')) + 1).filter(line => line.startsWith('warning:'))
+    return { result: [`started ${job.name}; 报告会以 workhorse 消息送达，不要轮询。`, ...warnings].join('\n') }
   })
 
   on('command.run', { command: 'workhorse-jobs' }, async $ => {
     return { text: await openPane($, options) }
   })
   on('command.run', { command: 'workhorse-kill' }, async ($, e) => {
-    const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-k', e.args.trim()], { env: environment(options) })
+    let name = e.args.trim()
+    if (!name) {
+      const session = await $.session.id()
+      const names: string[] = []
+      for (const key of await $.store.keys()) {
+        if (!key.startsWith('job:')) continue
+        const job = await $.store.get(key) as Job
+        if (job.session === session) names.push(job.name)
+      }
+      if (!names.length) return { text: '本会话没有运行中的 workhorse 任务。' }
+      const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-s', ...names], { env: environment(options) })
+      const running = (JSON.parse(result.stdout) as Status[]).filter(status => status.state === 'running')
+      if (!running.length) return { text: '本会话没有运行中的 workhorse 任务。' }
+      if (running.length > 1) return { text: `本会话有多个运行中的任务，请用 /workhorse-kill <name> 指名：\n${running.map(status => status.name).join('\n')}` }
+      name = running[0]!.name
+    }
+    const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-k', name], { env: environment(options) })
     return { text: result.stdout + result.stderr }
   })
 }
