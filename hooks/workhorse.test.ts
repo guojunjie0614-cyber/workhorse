@@ -50,16 +50,19 @@ test('running band refreshes elapsed seconds without stop or logs buttons', asyn
   await ui.unmount()
 })
 
-test('progress panel shows planned and unplanned progress and retains done jobs for three minutes', async ($, on) => {
+test('panel follows events live and disappears once every job is done', async ($, on) => {
   const { clock, store } = setup(on)
   on('fs.exists', () => ({ value: false }))
+  let mtime = 1
+  on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: mtime, isLink: false } }))
   on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: '' }))
-  for (const name of ['planned', 'unplanned']) {
+  for (const name of ['one', 'two']) {
     store[`job:/jobs/${name}`] = { name, session: 'session-1', goal: 'fix parser', doneWhen: 'unit test', warnedStall: false, warnedTests: false }
   }
+  let activity = 'Editing parser'
   let done = false
-  on('process.run', () => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify(
-    ['planned', 'unplanned'].map(name => ({ name, path: `/jobs/${name}`, state: done ? 'done' : 'running', mode: 'code', started: 0, cmds: 4, tests: 1, idle_min: 0, activity: 'Editing parser', files: 2, step: name === 'planned' ? 1 : 0, steps: name === 'planned' ? 4 : 0 })),
+  on('process.run', ($, e) => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify(
+    ['one', 'two'].filter(name => e.argv.includes(name)).map(name => ({ name, path: `/jobs/${name}`, state: done || name === 'two' ? 'done' : 'running', mode: 'code', started: 0, cmds: 4, tests: 1, idle_min: 0, activity, files: 2 })),
   ) } }))
   on('fs.read', () => ({ value: 'Fixed parser' }))
   on('prompt.submit', ($, e) => ({ text: e.text }))
@@ -68,14 +71,17 @@ test('progress panel shows planned and unplanned progress and retains done jobs 
   const ui = await $.ui.mount({ plugin: 'workhorse', component: 'AbovePrompt', surface: 'terminal', requestId: 'progress', props: {
     hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {},
   } })
-  expect(await ui.find({ type: 'Text', text: ' 25% ' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: ' … ' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '2 agents · 1 running · 1 done' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '████' })).toBeDefined()
+  await clock.advance(250)
+  activity = 'rg -n parse src'
+  mtime = 2
+  await clock.advance(250)
+  expect(await ui.find({ type: 'Text', text: '│    rg -n parse src · 4 cmds · 2 files' })).toBeDefined()
   done = true
-  await clock.advance(30000)
-  expect(await ui.find({ type: 'Text', text: ' 100% ' })).toBeDefined()
-  await clock.advance(179999)
-  expect(await ui.find({ type: 'Text', text: '2 agents · 0 running · 2 done' })).toBeDefined()
-  await clock.advance(1)
+  mtime = 3
+  await clock.advance(250)
+  expect(await ui.find({ type: 'Text', text: '2 agents · 1 running · 1 done' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: '2 agents · 0 running · 2 done' })).toBeUndefined()
   await ui.unmount()
 })

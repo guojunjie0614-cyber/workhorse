@@ -36,8 +36,6 @@ export type Status = {
   cmds: number
   activity: string
   files: number
-  step: number
-  steps: number
   tests: number
   tokens: number
   report: string
@@ -52,7 +50,7 @@ type Segment = { children: string; color?: 'claude' | 'success' | 'error' | 'ina
 
 export function panelLines(tasks: PanelTask[], now: number): Segment[][] {
   const visible = tasks.filter(task => task.state !== 'missing' && (task.completedAt === undefined || now - task.completedAt < 180000))
-  if (!visible.length) return []
+  if (!visible.some(task => task.state === 'running')) return []
   const frame = Math.floor(now / 250)
   const star = Array.from('·✢✳✶✻✽')[frame % 6]!
   const running = visible.filter(task => task.state === 'running').length
@@ -92,23 +90,24 @@ function taskLines(status: PanelTask, now: number, frame: number, star: string, 
   const elapsed = seconds < 60 ? `${seconds}s`
     : minutes < 60 ? `${minutes}m${String(seconds % 60).padStart(2, '0')}s`
       : `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, '0')}m`
-  const progress = status.state === 'done' ? 1 : status.steps > 0 ? Math.min(1, Math.max(0, status.step / status.steps)) : undefined
-  const filled = progress === undefined ? 4 : Math.round(progress * 20)
-  const offset = progress === undefined ? 16 - Math.abs(frame % 32 - 16) : 0
+  const running = status.state === 'running'
+  const offset = running ? 16 - Math.abs(frame % 32 - 16) : 0
   const failed = status.state === 'dead'
   return [
     [
       { children: last ? '└─ ' : '├─ ' },
       { children: status.state === 'running' ? star : failed ? '✗' : '✓', color: failed ? 'error' : status.state === 'done' ? 'success' : 'claude' },
       { children: ` ${pad(status.name, nameWidth)}  ${pad(status.goal, 24)}  ` },
-      { children: '░'.repeat(offset), color: 'inactive' },
-      { children: '█'.repeat(filled), color: 'claude' },
-      { children: '░'.repeat(20 - offset - filled), color: 'inactive' },
-      { children: ` ${(progress === undefined ? '…' : `${Math.round(progress * 100)}%`).padStart(4)}  ` },
+      ...(running ? [
+        { children: '░'.repeat(offset), color: 'inactive' as const },
+        { children: '████', color: 'claude' as const },
+        { children: '░'.repeat(16 - offset), color: 'inactive' as const },
+      ] : [{ children: ' '.repeat(20) }]),
+      { children: '  ' },
       { children: (failed ? 'failed' : status.state).padEnd(7), color: failed ? 'error' : 'claude' },
       { children: `  ${elapsed}` },
     ],
-    [{ children: `${last ? '   ' : '│  '}  ${status.state === 'running' && status.steps > 0 ? `Step ${status.step}/${status.steps} · ` : ''}${status.activity} · ${status.cmds} cmds · ${status.files} files`, dimColor: true }],
+    [{ children: `${last ? '   ' : '│  '}  ${status.activity} · ${status.cmds} cmds · ${status.files} files`, dimColor: true }],
   ]
 }
 

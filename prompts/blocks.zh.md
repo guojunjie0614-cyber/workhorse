@@ -15,7 +15,6 @@
 
 <default_follow_through_policy>
 有歧义时取最直接、低风险的理解，继续做，在报告里用一句话说明。只有缺失信息会影响正确性或导致不可逆操作时才停下来问。
-开工时先单独发一行 `计划: 步骤1 | 步骤2 | …`（3–6 步）；每开始一步先发一行 `步骤 k/n: 简述`。
 </default_follow_through_policy>
 
 <compact_output_contract>

@@ -34,6 +34,7 @@ async function openPane($: EngineInterface, options: PluginOptions) {
 
 let ticking: { cancel: () => void } | undefined
 let polling = false
+const seenEvents = new Map<string, number>()
 let pollAgain = false
 
 async function pollOnce($: EngineInterface, options: PluginOptions) {
@@ -74,22 +75,31 @@ async function poll($: EngineInterface, options: PluginOptions) {
   }
   const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-s', ...owned.map(([, job]) => job.name)], { env: environment(options) })
   const polled = JSON.parse(result.stdout) as Status[]
+  const fresh = polled.filter(status => status.state !== 'missing').map(status => ({
+    ...status,
+    goal: owned.find(([, job]) => job.name === status.name)![1].goal,
+    completedAt: status.state === 'done' || status.state === 'dead'
+      ? statuses.find(previous => previous.name === status.name)?.completedAt ?? now
+      : undefined,
+  }))
   statuses = [
-    ...statuses.filter(status => status.completedAt !== undefined && now - status.completedAt < 180000 && !polled.some(current => current.name === status.name)),
-    ...polled.filter(status => status.state !== 'missing').map(status => ({
-      ...status,
-      goal: owned.find(([, job]) => job.name === status.name)![1].goal,
-      completedAt: status.state === 'done' || status.state === 'dead'
-        ? statuses.find(previous => previous.name === status.name)?.completedAt ?? now
-        : undefined,
-    })),
+    ...statuses.flatMap(previous => {
+      const current = fresh.find(status => status.name === previous.name)
+      if (current) return [current]
+      return previous.completedAt !== undefined && now - previous.completedAt < 180000 ? [previous] : []
+    }),
+    ...fresh.filter(status => !statuses.some(previous => previous.name === status.name)),
   ]
   $.ui.invalidate('ui.render')
   if (polled.some(status => status.state === 'running')) {
     ticking ??= $.clock.every(250, async () => {
       $.ui.invalidate('ui.render')
       for (const status of statuses) {
-        if (status.state === 'running' && await $.fs.exists(`${status.path}/report.txt`)) {
+        if (status.state !== 'running') continue
+        const stat = await $.fs.stat(`${status.path}/events.jsonl`).catch(() => undefined)
+        const changed = stat !== undefined && stat.mtimeMs !== seenEvents.get(status.name)
+        if (stat) seenEvents.set(status.name, stat.mtimeMs)
+        if (changed || await $.fs.exists(`${status.path}/report.txt`)) {
           void pollOnce($, options)
           return
         }
@@ -144,6 +154,11 @@ export const register: Register = (on, options) => {
   })
 
   on('session.start', async ($, e, next) => {
+    ticking?.cancel()
+    ticking = undefined
+    seenEvents.clear()
+    polling = false
+    pollAgain = false
     await $.tool.register({
       name: 'run',
       description: '让 Codex 启动一个后台 job，一个 job 只做一个改动。调用后立即返回，报告会以 workhorse 消息的形式送达，不要轮询。根因不明时先用 mode=review，再用 resume + to_code 转成修复。brief 里不要写 baseline 或全量测试。',

@@ -30,7 +30,7 @@ case "${1:-}" in
     for name in "$@"; do
       j="$root/$name"
       if [[ ! -d "$j" ]]; then
-        jq -n --arg name "$name" '{name: $name, state: "missing", activity: "", files: 0, step: 0, steps: 0}'
+        jq -n --arg name "$name" '{name: $name, state: "missing", activity: "", files: 0}'
         continue
       fi
       report=""
@@ -53,15 +53,11 @@ case "${1:-}" in
         --argjson elapsed "$(( (now - started) / 60 ))" --argjson idle "$(( (now - modified) / 60 ))" '
         [.[] | select(.type == "item.completed" and .item.type == "command_execution")] as $commands |
         [.[] | select(.type | startswith("item.")) | .item] as $items |
-        [.[] | select(.type == "item.completed" and .item.type == "agent_message") | (.item.text // "") | split("\n")[]] as $lines |
-        ([$lines[] | capture("^[-*>#\\s]*(计划|Plan)\\**[:：]\\s*(?<plan>.+)$") | .plan | split("|") | length] | last // 0) as $steps |
-        ([$lines[] | capture("^[-*>#\\s]*(步骤|Step)\\s*(?<step>[0-9]+)\\s*/\\s*(?<steps>[0-9]+)") | {step: (.step | tonumber), steps: (.steps | tonumber)}] | last // {step: 0, steps: $steps}) as $progress |
         {name: $name, path: $path, dir: $dir, state: $state, mode: $mode, model: $model, effort: $effort,
          activity: ($items | last | if .type == "file_change" then "Editing " + (.changes[0].path | split("/") | last)
                     elif .type == "command_execution" then (.command // "" | if startswith("/bin/zsh -lc ") then ltrimstr("/bin/zsh -lc ") | sub("^[\u0027\"]"; "") | sub("[\u0027\"]$"; "") else . end)
                     elif .type == "agent_message" then (.text // "") else "" end | (split("\n")[0] // "") | .[:60]),
          files: ([.[] | select(.type == "item.completed" and .item.type == "file_change") | .item.changes[].path] | unique | length),
-         step: $progress.step, steps: $progress.steps,
          exit: (if $state == "done" then ($report | capture(" exit=(?<code>-?[0-9]+) ").code | tonumber) else null end),
          started: $started, elapsed_min: $elapsed, idle_min: $idle,
          cmds: ($commands | length),
