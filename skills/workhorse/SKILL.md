@@ -5,7 +5,7 @@ description: (Claude Code only; Codex must not use this.) Hand coding, ops (depl
 
 # workhorse: Codex as a subagent
 
-**With the workhorse mod loaded** (the `mcp__workhorse__run` tool is available), use the tool. Fill `goal`, `context`, `done_when` (required) and `constraints` (optional), the four parts below, plus `mode` (`code`/`review`/`ops`), `dir` or `worktree`, `name`, `effort` (`low`/`medium`/`high`), `model` as needed; `resume` + `to_code` replace `workhorse -r [name] --code`. The call returns at once, and the report arrives later as a message from workhorse, with the acceptance command to run. Don't poll. The mod refuses a brief without `done_when` or with gate phrases (baseline, full test suite, ...), asks before `mode: ops`, and warns you when a job stalls or over-tests. The user can run `/workhorse-jobs` and `/workhorse-kill <name>` at any time.
+**With the workhorse mod loaded** (the `mcp__workhorse__run` tool is available), use the tool. Fill `goal`, `context`, `done_when` (required) and `constraints` (optional), the four parts below, plus `mode` (`code`/`review`/`ops`), `dir` or `worktree`, `name`, `effort` (`low`/`medium`/`high`), `model` as needed; `resume` + `to_code` replace `workhorse -r [name] --code`. The call returns at once, and the report arrives later as a message from workhorse: for a code job with the acceptance command to run, for a review job with a reminder to check its evidence. Don't poll. The mod refuses a brief without `done_when` or with gate phrases (baseline, full test suite, ...), asks before `mode: ops` and before resuming an ops job (unless `to_code` or another `mode` is set), and warns you when a job stalls or over-tests. While jobs run, a band above the prompt shows each one with its state, elapsed time and latest Codex event. The user can run `/workhorse-jobs` and `/workhorse-kill <name>` at any time.
 
 **Without the mod**, use `workhorse` the way you use the Agent tool: one Bash call with `run_in_background: true`, the brief as a heredoc, and a notification when it finishes. Its stdout is the short report. `workhorse` is on PATH, or at `${CLAUDE_PLUGIN_ROOT}/bin/workhorse`.
 
@@ -19,22 +19,22 @@ Both paths share the CLI below for inspecting and cleaning up jobs.
 
 | Call | Effect |
 |---|---|
-| `workhorse -C dir` | coding job (default): code model at **medium**, writes only inside `dir`, network on, cannot touch other machines |
-| `workhorse --review` | read-only diagnosis or review: review model at high, runs no tests |
+| `workhorse -C dir` | coding job (default): code model at **medium**, writes only inside `dir` and its job folder, network on |
+| `workhorse --review` | read-only diagnosis or review: review model at high, runs no tests unless the brief names a check |
 | `workhorse --ops` | deploys, remote runs, anything outside the repo: ops model at high, full access; off when `allow_ops` is false |
 | `workhorse -w name` | create a worktree `<repo>-name` on branch `workhorse/name` from the current HEAD (uncommitted changes are not included) and run there; the job is named `name` |
-| `workhorse --clean name` | after merging, remove that worktree and branch; refuses if the worktree has uncommitted changes or the branch is unmerged |
+| `workhorse --clean name` | after merging, remove that worktree and branch; refuses, leaving both in place, if the branch is not merged into the main checkout's HEAD or the worktree has uncommitted changes |
 | `workhorse -r [name]` | follow-up in the same Codex thread (default: the last job), with the same dir, mode, model and effort; only the new task is sent, because the rules are already in the thread. Refused while that job is still running |
 | `workhorse -r [name] --code` | turn a `--review` diagnosis into the fix on the same thread, with no re-reading |
 | Fast tier | models matching `fast_match` (default `*sol*`) run on the Fast tier with high effort by default; other models use the default tier |
 | `-e low\|high` | `low` for mechanical edits; `high` for hard root-cause work. `-m` overrides the model |
 | `workhorse -n name` | name the job (default `<dir>-<time>`) |
-| `workhorse -s [name ...]` | job status as JSON (all running jobs when no name) |
-| `workhorse -l` | jobs with state, minutes, tokens, commands, test runs |
+| `workhorse -s [name ...]` | job status as JSON (all running jobs when no name), including `activity` (the latest event in one line) and `files` (changed files) |
+| `workhorse -l` | recent jobs: running ones with minutes, finished ones with the report's first line (exit, minutes, tokens, commands, test runs) |
 | `workhorse -t [name]` | last commands, test runs so far, elapsed time and minutes since the last output (spots a stall) |
 | `workhorse -k [name]` | stop a job and every command it started |
 
-The report's first line has `tests=N`: how many test commands Codex ran. Anything above 1–2 means it over-tested; tighten the next brief. The diff stat covers only this job's changes, including new files, even when the tree was already dirty. Jobs older than 14 days are pruned. Jobs live in `~/.cache/workhorse/<name>/` (`prompt.md`, `events.jsonl`, `codex.log`, `final.md`, `report.txt`, `session.txt`). Models, efforts, the Fast-tier match, disabled MCP servers and the rule language come from the plugin's settings, `~/.config/workhorse/config`, or `WORKHORSE_*` variables. Model, effort and sandbox are passed on every call, resumes included, so the user's Codex app settings never leak in. If a resume silently starts a new thread, the report says so.
+The report's first line has `tests=N`: how many test commands Codex ran. Anything above 1–2 means it over-tested; tighten the next brief. The diff stat compares the tree before and after the job, including new files, so it is right even when the tree was already dirty; anything else that writes to that tree meanwhile is counted too, so give parallel jobs their own worktrees. Jobs older than 14 days are pruned. Jobs live in `~/.cache/workhorse/<name>/` (`prompt.md`, `events.jsonl`, `codex.log`, `final.md`, `report.txt`, `session.txt`). Models, efforts, the Fast-tier match, disabled MCP servers and the rule language come from the plugin's settings, `~/.config/workhorse/config`, or `WORKHORSE_*` variables. Model, effort and sandbox are passed on every call, resumes included, so the user's Codex app settings never leak in. If a resume silently starts a new thread, the report says so.
 
 workhorse wraps the brief in `<task>` and adds the blocks from OpenAI's own Codex prompting guide: `action_safety`, `verification_loop`, `default_follow_through_policy` and `compact_output_contract`. These carry the lean rules: do only what is asked, no defensive code, no unrequested tests, run only the named check once, no polling loops, keep going without routine questions, report in at most 10 lines. Don't repeat them in the brief.
 
