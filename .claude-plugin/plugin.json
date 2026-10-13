@@ -18,6 +18,8 @@
     "stall_minutes": { "type": "number", "title": "Idle minutes before warning", "default": 10, "description": "Idle minutes before warning" },
     "command_minutes": { "type": "number", "title": "Command minutes before warning", "default": 20, "description": "Warn once per command text after this many running minutes; never terminate the command" },
     "max_tests": { "type": "number", "title": "Test commands before warning", "default": 2, "description": "Test commands before warning" },
+    "repeat_limit": { "type": "number", "title": "Repeated commands before warning", "default": 3, "description": "Warn once per repeated command text; never terminate the job" },
+    "family_tokens_warn": { "type": "number", "title": "Family token warning threshold", "default": 1000000, "description": "Warn once per job when cumulative family tokens reach this threshold" },
     "poll_seconds": { "type": "number", "title": "Status polling interval", "default": 30, "description": "Seconds between job status polls" },
     "done_linger_minutes": { "type": "number", "title": "Finished job visibility", "default": 3, "description": "Minutes to keep finished jobs visible while other jobs run" },
     "report_max_chars": { "type": "number", "title": "Report character limit", "default": 6000, "description": "Maximum report characters included in completion notices" },

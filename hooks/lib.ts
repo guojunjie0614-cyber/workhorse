@@ -9,6 +9,8 @@ export const MS_PER_SECOND = 1000
 export const SECONDS_PER_MINUTE = 60
 export const MINUTES_PER_HOUR = 60
 export const MS_PER_MINUTE = MS_PER_SECOND * SECONDS_PER_MINUTE
+export const HOURS_PER_DAY = 24
+export const MS_PER_DAY = MS_PER_MINUTE * MINUTES_PER_HOUR * HOURS_PER_DAY
 export const TIME_DIGITS = 2
 export const NEGATION_WINDOW = 5
 export const NEGATIONS = ['不', '没', '无', '别', '勿', '禁止', '\\bno\\b', '\\bnot\\b', "\\bdon't\\b", '\\bwithout\\b', '\\bavoid\\b', '\\bskip\\b']
@@ -16,8 +18,8 @@ export const NEGATIONS = ['不', '没', '无', '别', '勿', '禁止', '\\bno\\b
 // The band keeps Claude's own agents-panel wording in every language.
 const PANEL_TEXT = {
   working: 'Working…',
-  summary: (total: number, running: number, done: number, failed: number) => `${total} agents · ${running} running · ${done} done${failed ? ` · ${failed} failed` : ''}`,
-  states: { running: 'running', done: 'done', dead: 'dead', missing: 'missing', failed: 'failed' },
+  summary: (total: number, running: number, done: number, failed: number, cancelled: number) => `${total} agents · ${running} running · ${done} done${failed ? ` · ${failed} failed` : ''}${cancelled ? ` · ${cancelled} cancelled` : ''}`,
+  states: { running: 'running', done: 'done', dead: 'dead', missing: 'missing', failed: 'failed', cancelled: 'cancelled' },
   busy: (minutes: number, command: string) => `running ${minutes}m: ${command}`,
   activity: (activity: string, cmds: number, files: number) => `${activity} · ${cmds} cmds · ${files} files`,
 }
@@ -27,6 +29,9 @@ export const MESSAGES = {
     missing: (name: string) => `workhorse: job ${name} 记录已丢失`,
     truncated: (path: string) => `\n已截断，完整报告见 ${path}/report.txt`,
     deadReminder: (name: string) => `用 workhorse -t ${name} 看日志`,
+    cancelledReminder: (name: string) => `任务已取消；用 workhorse -t ${name} 查看停止前的日志`,
+    repeated: (name: string, repeat: number, command: string) => `workhorse: job ${name} 原地打转：相同命令和退出码已连续出现 ${repeat} 次：${command}；请检查执行方向，仅提醒，不会自动终止`,
+    familyTokens: (name: string, tokens: number) => `workhorse: job ${name} 家族累计已使用 ${tokens} token；请检查剩余工作和预算`,
     reviewReminder: (base: string) => `核对结论和证据；要修复就用 resume ${base} + to_code 交回`,
     opsReminder: '核对产物和远端状态，不要重复执行部署',
     codeReminder: (doneWhen: string, base: string) => `对照 brief 读 diff，自己运行 ${doneWhen}；要修复就用 mcp__workhorse__run 工具 resume ${base} 交回`,
@@ -38,6 +43,7 @@ export const MESSAGES = {
     runDescription: '让 Codex 启动一个后台 job，一个 job 只做一个改动。调用后立即返回，报告会以 workhorse 消息的形式送达，不要轮询。根因不明时先用 mode=review，再用 resume + to_code 转成修复。brief 里不要写 baseline 或全量测试。',
     effortDescription: '推理强度字符串；常用值为 low、medium、high。',
     jobsDescription: '打开并列出 Codex 任务',
+    jobsArgumentHint: '[任务名]',
     killDescription: '终止一个 Codex 任务',
     killArgumentHint: '<任务名>',
     refresh: '刷新',
@@ -55,6 +61,9 @@ export const MESSAGES = {
     missing: (name: string) => `workhorse: job ${name} record is missing`,
     truncated: (path: string) => `\nTruncated; full report: ${path}/report.txt`,
     deadReminder: (name: string) => `Use workhorse -t ${name} to view logs`,
+    cancelledReminder: (name: string) => `Job cancelled; use workhorse -t ${name} to inspect logs before it stopped`,
+    repeated: (name: string, repeat: number, command: string) => `workhorse: job ${name} is spinning in place: the same command and exit code occurred ${repeat} consecutive times: ${command}; review the approach; warning only, no automatic termination`,
+    familyTokens: (name: string, tokens: number) => `workhorse: job ${name} family has used ${tokens} tokens in total; review remaining work and budget`,
     reviewReminder: (base: string) => `Check conclusions and evidence; for fixes, hand back with resume ${base} + to_code`,
     opsReminder: 'Check artifacts and remote state; do not repeat the deployment',
     codeReminder: (doneWhen: string, base: string) => `Read the diff against the brief and run ${doneWhen} yourself; for fixes, hand back with the mcp__workhorse__run tool using resume ${base}`,
@@ -66,6 +75,7 @@ export const MESSAGES = {
     runDescription: 'Start a background Codex job for a single change. Returns immediately; the report arrives as a workhorse message. Do not poll. If the root cause is unknown, use mode=review first, then resume + to_code for fixes. Do not request baselines or full test suites in the brief.',
     effortDescription: 'Reasoning effort string; common values are low, medium and high.',
     jobsDescription: 'Open and list Codex jobs',
+    jobsArgumentHint: '[name]',
     killDescription: 'Kill a Codex job',
     killArgumentHint: '<name>',
     refresh: 'Refresh',
@@ -108,6 +118,8 @@ export type Job = {
   warnedStall: boolean
   warnedTests: boolean
   warnedBusy?: string
+  warnedRepeat?: string[]
+  warnedFamilyTokens?: boolean
 }
 
 export type Status = {
@@ -128,11 +140,18 @@ export type Status = {
   files: number
   tests: number
   tokens: number
+  cancelled: boolean
+  repeat: number
+  repeat_cmd: string
+  family_tokens: number
   report: string
 }
 
-export function jobRows(output: string): { name: string; label: string }[] {
-  return output.split('\n').filter(line => line.trim()).map(line => ({ name: line.trim().split(/\s+/)[0]!, label: line.trim() }))
+export function jobRows(output: string, unread: string[]): { name: string; label: string }[] {
+  return output.split('\n').filter(line => line.trim()).map(line => {
+    const name = line.trim().split(/\s+/)[0]!
+    return { name, label: `${unread.includes(name) ? '● ' : ''}${line.trim()}` }
+  })
 }
 
 export type PanelTask = Status & { goal: string; completedAt?: number }
@@ -149,11 +168,12 @@ export function panelLines(tasks: PanelTask[], now: number, options: PluginOptio
   const rows = visible.map((task, index) => taskLines(task, now, star, index === visible.length - 1, nameWidth, text))
   const remainingColumns = Math.min(...rows.map(([line]) => columns - line!.reduce((sum, segment) => sum + width(segment.children), 0)))
   const goalWidth = Math.max(MIN_GOAL_COLUMNS, Math.min(Math.max(...visible.map(task => width(headline(task.goal)))), Number(options.goal_columns), remainingColumns))
-  const done = visible.filter(task => task.state === 'done' && task.exit === 0).length
-  const failed = visible.filter(task => task.state === 'dead' || (task.state === 'done' && task.exit !== 0)).length
+  const done = visible.filter(task => !task.cancelled && task.state === 'done' && task.exit === 0).length
+  const failed = visible.filter(task => !task.cancelled && (task.state === 'dead' || (task.state === 'done' && task.exit !== 0))).length
+  const cancelled = visible.filter(task => task.cancelled).length
   return [
     [{ children: `${star} ${text.working}`, color: 'claude' }],
-    [{ children: text.summary(visible.length, running, done, failed), dimColor: true }],
+    [{ children: text.summary(visible.length, running, done, failed, cancelled), dimColor: true }],
     ...visible.flatMap((task, index) => taskLines(task, now, star, index === visible.length - 1, nameWidth, text, fit(headline(task.goal), goalWidth))),
   ]
 }
@@ -203,13 +223,13 @@ function taskLines(status: PanelTask, now: number, star: string, last: boolean, 
   const elapsed = seconds < SECONDS_PER_MINUTE ? `${seconds}s`
     : minutes < MINUTES_PER_HOUR ? `${minutes}m${String(seconds % SECONDS_PER_MINUTE).padStart(TIME_DIGITS, '0')}s`
       : `${Math.floor(minutes / MINUTES_PER_HOUR)}h${String(minutes % MINUTES_PER_HOUR).padStart(TIME_DIGITS, '0')}m`
-  const failed = status.state === 'dead' || (status.state === 'done' && status.exit !== 0)
+  const failed = !status.cancelled && (status.state === 'dead' || (status.state === 'done' && status.exit !== 0))
   return [
     [
       { children: last ? '└─ ' : '├─ ' },
-      { children: status.state === 'running' ? star : failed ? '✗' : '✓', color: failed ? 'error' : status.state === 'done' ? 'success' : 'claude' },
+      { children: status.cancelled ? '·' : status.state === 'running' ? star : failed ? '✗' : '✓', color: status.cancelled ? 'inactive' : failed ? 'error' : status.state === 'done' ? 'success' : 'claude' },
       { children: ` ${pad(taskName(status), nameWidth)}  ${goal}  ` },
-      { children: pad(text.states[failed ? 'failed' : status.state], Math.max(...Object.values(text.states).map(width))), color: failed ? 'error' : 'claude' },
+      { children: pad(text.states[status.cancelled ? 'cancelled' : failed ? 'failed' : status.state], Math.max(...Object.values(text.states).map(width))), color: status.cancelled ? 'inactive' : failed ? 'error' : 'claude' },
       { children: `  ${elapsed}` },
     ],
     [{ children: `${last ? '   ' : '│  '}  ${text.activity(status.busy ? text.busy(status.busy_min, status.busy) : status.activity, status.cmds, status.files)}`, dimColor: true }],
