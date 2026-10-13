@@ -107,7 +107,7 @@ case "${1:-}" in
       if [[ "$rest" =~ ^\.([0-9]+)$ ]]; then round="${BASH_REMATCH[1]}"
       elif [[ "$rest" =~ ^(\.[0-9]+)+$ ]]; then round=$(( $(tr -cd . <<<"$rest" | wc -c) + 1 )); fi
       if [[ ! -d "$j" ]]; then
-        jq -n --arg name "$name" --arg base "$base" --argjson round "$round" '{name: $name, base: $base, round: $round, state: "missing", activity: "", busy: "", busy_min: 0, files: 0}'
+        jq -n --arg name "$name" --arg base "$base" --argjson round "$round" '{name: $name, base: $base, round: $round, state: "missing", activity: "", busy: "", busy_min: 0, files: 0, cancelled: false, repeat: 0, repeat_cmd: "", family_tokens: 0}'
         continue
       fi
       report=""
@@ -123,7 +123,13 @@ case "${1:-}" in
         log="$j/events.jsonl"
         modified=$(perl -e 'print((stat shift)[9])' "$log")
       fi
+      cancelled=false; [[ -f "$j/cancelled" ]] && cancelled=true
+      family_tokens=$(for family_run in "$root/$base" "$root/$base".*; do
+        [[ -f "$family_run/events.jsonl" ]] && [[ "$(base_of "${family_run##*/}")" == "$base" ]] &&
+          jq -c -R 'fromjson? // empty' "$family_run/events.jsonl"
+      done | jq -s 'map(select(.type == "turn.completed") | .usage.input_tokens - (.usage.cached_input_tokens // 0) + .usage.output_tokens) | add // 0')
       jq -s --arg name "$name" --arg path "$(cd "$j" && pwd)" \
+        --argjson cancelled "$cancelled" --argjson family_tokens "$family_tokens" \
         --arg base "$base" --argjson round "$round" --argjson now "$now" --argjson modified "$modified" \
         --arg dir "$(cat "$j/dir.txt" 2>/dev/null)" \
         --arg state "$state" --arg mode "$(cat "$j/mode.txt" 2>/dev/null)" \
@@ -132,10 +138,19 @@ case "${1:-}" in
         --argjson summary_chars "$SUMMARY_CHARS" --argjson last_cmds "$LAST_CMDS" --argjson seconds_per_minute "$SECONDS_PER_MINUTE" \
         --argjson elapsed "$(( (now - started) / SECONDS_PER_MINUTE ))" --argjson idle "$(( (now - modified) / SECONDS_PER_MINUTE ))" "$COMMAND_JQ"'
         [.[] | select(.type == "item.completed" and .item.type == "command_execution")] as $commands |
+        (reduce (.[] | select(.type == "item.completed") | .item) as $item
+          ({count: 0, command: "", exit_code: null};
+           if $item.type == "file_change" then {count: 0, command: "", exit_code: null}
+           elif $item.type == "command_execution" then
+             {count: (if .command == $item.command and .exit_code == $item.exit_code then .count + 1 else 1 end),
+              command: $item.command, exit_code: $item.exit_code}
+           else . end)) as $repeat |
         ([.[] | select(.type == "item.started" and .item.type == "command_execution")] | last) as $last_command |
         ($last_command != null and (any($commands[]; .item.id == $last_command.item.id) | not)) as $busy |
         [.[] | select(.type | startswith("item.")) | .item] as $items |
         {name: $name, base: $base, round: $round, path: $path, dir: $dir, state: $state, mode: $mode, model: $model, effort: $effort,
+         cancelled: $cancelled, repeat: $repeat.count, repeat_cmd: (if $repeat.count == 0 then "" else ($repeat.command | command_display) end),
+         family_tokens: $family_tokens,
          activity: ($items | last | if .type == "file_change" then "Editing " + (.changes[0].path | split("/") | last)
                     elif .type == "command_execution" then (.command // "" | command_display)
                     elif .type == "agent_message" then (.text // "") else "" end | (split("\n")[0] // "") | .[:$summary_chars]),
@@ -180,6 +195,7 @@ case "${1:-}" in
   -k)
     j="$(resolve "${2:-$(newest)}")"
     alive "$j" || { echo "not running"; exit 0; }
+    touch "$j/cancelled"
     kill -TERM $(tree "$(cat "$j/pid")") 2>/dev/null; echo "stopped $(basename "$j")"; exit 0 ;;
   --clean)
     j="$root/${2:?usage: workhorse --clean name}"; w="$(cat "$j/worktree.txt" 2>/dev/null)"
@@ -349,7 +365,7 @@ printf '%s\n' "${sid:-$session}" > "$out/session.txt"
 {
   echo "== $(basename "$out") exit=$rc $mode $model/$effort/$tier $(( ($(date +%s) - start + SECONDS_PER_MINUTE - 1) / SECONDS_PER_MINUTE ))min" \
        "$(jq -sr '[.[] | select(.type == "turn.completed") | .usage] | "tokens=\(map(.input_tokens - (.cached_input_tokens // 0) + .output_tokens) | add // 0) cached=\(map(.cached_input_tokens // 0) | add // 0)"' "$out/events.jsonl") cmds=$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$out/events.jsonl")" \
-       "tests=$(jq -s --arg tests "$WORKHORSE_TEST_PATTERN" --argjson summary_chars "$SUMMARY_CHARS" "$COMMAND_JQ"'[.[] | select(.type == "item.completed" and .item.type == "command_execution") | select(.item.command | is_test)] | length' "$out/events.jsonl")"
+       "tests=$(jq -s --arg tests "$WORKHORSE_TEST_PATTERN" --argjson summary_chars "$SUMMARY_CHARS" "$COMMAND_JQ"'[.[] | select(.type == "item.completed" and .item.type == "command_execution") | select(.item.command | is_test)] | length' "$out/events.jsonl")$([[ -f "$out/cancelled" ]] && printf ' cancelled')"
   [[ -n "$session" && -n "$sid" && "$sid" != "$session" ]] && echo "!! resume started a new thread; context did not carry over"
   if (( isgit )) && [[ -n "$pre" ]]; then
     post="$(snap "$dir")"

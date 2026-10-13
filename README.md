@@ -14,6 +14,8 @@ A Claude Code mod that hands coding, review and ops work to Codex the way Claude
 - **No competing delegate.** With `hide_codex_rescue` (default on), the official Codex plugin's `codex:codex-rescue` subagent is not offered, so Claude doesn't pick between two delegation paths.
 - **`workhorse` CLI.** `bin/workhorse` is the engine and works on its own: `workhorse -C dir`, `--review`, `--ops`, `-w name`, `-r [name] [--code]`, `-l`, `-t`, `-s` (JSON status, including `activity`, the latest event in one line, and `files`, the number of changed files), `-k`, `--clean`, `--detach`. The bundled skill teaches Claude both paths.
 
+`-s` also includes `cancelled` (boolean: this round was stopped by `-k`), `repeat` (integer: the latest consecutive completed commands with identical raw `command` and `exit_code`, reset by a completed `file_change`; 0 when none), `repeat_cmd` (that command's `command_display`, or `""` when `repeat` is 0), and `family_tokens` (tokens across all rounds of the base job, including this round, summed as input − cached + output, matching reports). Cancelled rounds append ` cancelled` to the report's first line. The existing `tokens` field remains input + output for the current round.
+
 ## Requirements
 
 - Claude Code v2.1.287 or later (tested with v2.1.296)
