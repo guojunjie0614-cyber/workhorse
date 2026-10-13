@@ -1,8 +1,8 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
-import { argv, brief, environment, jobRows, lint, started, statusLine, toolLine } from './lib'
-import type { Input, Job, Status } from './lib'
+import { argv, brief, environment, jobRows, lint, panelLines, started, toolLine } from './lib'
+import type { Input, Job, PanelTask, Status } from './lib'
 
-let statuses: Status[] = []
+let statuses: PanelTask[] = []
 let recentJobs: { name: string; label: string }[] = []
 let selectedJob = ''
 let jobOutput = ''
@@ -58,6 +58,7 @@ async function pollOnce($: EngineInterface, options: PluginOptions) {
 
 async function poll($: EngineInterface, options: PluginOptions) {
   const session = await $.session.id()
+  const now = await $.clock.now()
   const owned: [string, Job][] = []
   for (const key of await $.store.keys()) {
     if (!key.startsWith('job:')) continue
@@ -65,7 +66,7 @@ async function poll($: EngineInterface, options: PluginOptions) {
     if (job?.session === session) owned.push([key, job])
   }
   if (!owned.length) {
-    statuses = []
+    statuses = statuses.filter(status => status.completedAt !== undefined && now - status.completedAt < 180000)
     ticking?.cancel()
     ticking = undefined
     $.ui.invalidate('ui.render')
@@ -73,10 +74,19 @@ async function poll($: EngineInterface, options: PluginOptions) {
   }
   const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-s', ...owned.map(([, job]) => job.name)], { env: environment(options) })
   const polled = JSON.parse(result.stdout) as Status[]
-  statuses = polled
+  statuses = [
+    ...statuses.filter(status => status.completedAt !== undefined && now - status.completedAt < 180000 && !polled.some(current => current.name === status.name)),
+    ...polled.filter(status => status.state !== 'missing').map(status => ({
+      ...status,
+      goal: owned.find(([, job]) => job.name === status.name)![1].goal,
+      completedAt: status.state === 'done' || status.state === 'dead'
+        ? statuses.find(previous => previous.name === status.name)?.completedAt ?? now
+        : undefined,
+    })),
+  ]
   $.ui.invalidate('ui.render')
   if (polled.some(status => status.state === 'running')) {
-    ticking ??= $.clock.every(1000, async () => {
+    ticking ??= $.clock.every(250, async () => {
       $.ui.invalidate('ui.render')
       for (const status of statuses) {
         if (status.state === 'running' && await $.fs.exists(`${status.path}/report.txt`)) {
@@ -155,15 +165,11 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const running = statuses.filter(status => status.state === 'running')
-    if (!running.length) return next(e)
     const now = await $.clock.now()
+    const lines = panelLines(statuses, now)
+    if (!lines.length) return next(e)
     const { Box, Text } = $.ui.resolve(e)
-    return Box({ flexDirection: 'column', children: running.map(status => Box({
-      flexDirection: 'row', gap: 1, children: [
-        Text({ color: status.idle_min >= Number(options.stall_minutes) || status.tests > Number(options.max_tests) ? 'error' : 'text', children: statusLine(status, now) }),
-      ],
-    })) })
+    return Box({ flexDirection: 'column', children: lines.map(line => Text({ children: line.map(segment => Text({ color: 'text', ...segment })) })) })
   })
 
   on('ui.render', { component: 'Pane' }, ($, e, next) => {

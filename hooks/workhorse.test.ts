@@ -34,7 +34,7 @@ test('running band refreshes elapsed seconds without stop or logs buttons', asyn
   on('process.run', ($, e) => {
     calls.push([...e.argv])
     return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify([
-      { name: 'patch', path: '/jobs/patch', state: 'running', mode: 'code', started: 0, elapsed_min: 0, cmds: 4, tests: 1, idle_min: 2 },
+      { name: 'patch', path: '/jobs/patch', state: 'running', mode: 'code', started: 0, elapsed_min: 0, cmds: 4, tests: 1, idle_min: 2, activity: 'Editing parser', files: 2, step: 1, steps: 2 },
     ]) } }
   })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
@@ -42,11 +42,41 @@ test('running band refreshes elapsed seconds without stop or logs buttons', asyn
   const ui = await $.ui.mount({ plugin: 'workhorse', component: 'AbovePrompt', surface: 'terminal', requestId: 'band', props: {
     hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {},
   } })
-  expect(await ui.find({ type: 'Text', text: 'patch · code · 30s · cmds 4 · tests 1 · idle 2m' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' · 30s' })).toBeDefined()
   await clock.advance(35000)
-  expect(await ui.find({ type: 'Text', text: 'patch · code · 1m05s · cmds 4 · tests 1 · idle 2m' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' · 1m05s' })).toBeDefined()
   expect(await ui.find({ type: 'Button' })).toBeUndefined()
   expect(calls).toHaveLength(2)
+  await ui.unmount()
+})
+
+test('progress panel shows planned and unplanned progress and retains done jobs for three minutes', async ($, on) => {
+  const { clock, store } = setup(on)
+  on('fs.exists', () => ({ value: false }))
+  on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: '' }))
+  for (const name of ['planned', 'unplanned']) {
+    store[`job:/jobs/${name}`] = { name, session: 'session-1', goal: 'fix parser', doneWhen: 'unit test', warnedStall: false, warnedTests: false }
+  }
+  let done = false
+  on('process.run', () => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify(
+    ['planned', 'unplanned'].map(name => ({ name, path: `/jobs/${name}`, state: done ? 'done' : 'running', mode: 'code', started: 0, cmds: 4, tests: 1, idle_min: 0, activity: 'Editing parser', files: 2, step: name === 'planned' ? 1 : 0, steps: name === 'planned' ? 4 : 0 })),
+  ) } }))
+  on('fs.read', () => ({ value: 'Fixed parser' }))
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
+  await clock.advance(30000)
+  const ui = await $.ui.mount({ plugin: 'workhorse', component: 'AbovePrompt', surface: 'terminal', requestId: 'progress', props: {
+    hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {},
+  } })
+  expect(await ui.find({ type: 'Text', text: ' 25% ' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' … ' })).toBeDefined()
+  done = true
+  await clock.advance(30000)
+  expect(await ui.find({ type: 'Text', text: ' 100% ' })).toBeDefined()
+  await clock.advance(179999)
+  expect(await ui.find({ type: 'Text', text: '2 agents · 0 running · 2 done' })).toBeDefined()
+  await clock.advance(1)
+  expect(await ui.find({ type: 'Text', text: '2 agents · 0 running · 2 done' })).toBeUndefined()
   await ui.unmount()
 })
 
