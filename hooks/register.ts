@@ -1,18 +1,52 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
-import { argv, brief, environment, lint, started } from './lib'
+import { argv, brief, environment, jobRows, lint, started, statusLine, toolLine } from './lib'
 import type { Input, Job, Status } from './lib'
+
+let statuses: Status[] = []
+let recentJobs: { name: string; label: string }[] = []
+let selectedJob = ''
+let jobOutput = ''
+
+async function refreshPane($: EngineInterface, options: PluginOptions) {
+  const list = await $.process.run([`${$.plugin.root}/bin/cx`, '-l'], { env: environment(options) })
+  recentJobs = jobRows(list.stdout)
+  if (!selectedJob && recentJobs.length) selectedJob = recentJobs[0]!.name
+  jobOutput = list.stderr
+  if (selectedJob) {
+    const result = await $.process.run([`${$.plugin.root}/bin/cx`, '-s', selectedJob], { env: environment(options) })
+    const [status] = JSON.parse(result.stdout) as Status[]
+    if (status!.state === 'done') {
+      jobOutput = await $.fs.read(`${status!.path}/report.txt`)
+    } else {
+      const log = await $.process.run([`${$.plugin.root}/bin/cx`, '-t', selectedJob], { env: environment(options) })
+      jobOutput = log.stdout + log.stderr
+    }
+  }
+  $.ui.invalidate('ui.render')
+}
+
+async function openPane($: EngineInterface, options: PluginOptions) {
+  await refreshPane($, options)
+  await $.ui.open({ id: 'cx', title: 'cx', focus: true })
+}
+
+async function stopJob($: EngineInterface, options: PluginOptions, name: string) {
+  const result = await $.process.run([`${$.plugin.root}/bin/cx`, '-k', name], { env: environment(options) })
+  await $.ui.toast(result.stdout + result.stderr)
+}
 
 async function poll($: EngineInterface, options: PluginOptions) {
   const session = await $.session.id()
   const jobs = (await $.store.get('jobs') ?? {}) as Record<string, Job>
   const owned = Object.entries(jobs).filter(([, job]) => job.session === session)
   if (!owned.length) {
-    await $.ui.status(undefined)
+    statuses = []
+    $.ui.invalidate('ui.render')
     return
   }
   const result = await $.process.run([`${$.plugin.root}/bin/cx`, '-s', ...owned.map(([, job]) => job.name)], { env: environment(options) })
-  const statuses = JSON.parse(result.stdout) as Status[]
-  const running: string[] = []
+  statuses = JSON.parse(result.stdout) as Status[]
+  $.ui.invalidate('ui.render')
   for (const [path, job] of owned) {
     try {
       const status = statuses.find(s => s.name === job.name)!
@@ -31,7 +65,6 @@ async function poll($: EngineInterface, options: PluginOptions) {
         delete current[path]
         await $.store.set('jobs', current)
       } else if (status.state === 'running') {
-        running.push(`${job.name} ${status.elapsed_min}m tests ${status.tests}`)
         if (status.idle_min >= Number(options.stall_minutes) && !job.warnedStall) {
           job.warnedStall = true
           const text = `workhorse: job ${job.name} 已 ${status.idle_min} 分钟无输出，用 cx -t ${job.name} 查看，卡住就 cx -k ${job.name} 后把 brief 缩小重派`
@@ -52,7 +85,6 @@ async function poll($: EngineInterface, options: PluginOptions) {
       await $.ui.toast(`workhorse: job ${job.name} 状态处理失败：${String(error)}`)
     }
   }
-  await $.ui.status(running.length ? running.join('\n') : undefined)
 }
 
 export const register: Register = (on, options) => {
@@ -71,10 +103,67 @@ export const register: Register = (on, options) => {
         required: ['goal', 'context', 'done_when'],
       },
     })
+    await $.command.register({ name: 'cx', description: 'Open Codex jobs', immediate: true })
     await $.command.register({ name: 'cx-jobs', description: 'List Codex jobs', immediate: true })
     await $.command.register({ name: 'cx-kill', description: 'Kill a Codex job', argumentHint: '<name>', immediate: true })
     $.clock.every(30000, () => poll($, options))
     return next(e)
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
+    const running = statuses.filter(status => status.state === 'running')
+    if (!running.length) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    return Box({ flexDirection: 'column', children: running.map(status => Box({
+      flexDirection: 'row', gap: 1, children: [
+        Text({ color: status.idle_min >= Number(options.stall_minutes) || status.tests > Number(options.max_tests) ? 'red' : undefined, children: statusLine(status) }),
+        Button({ key: `logs:${status.name}`, label: '日志', onPress: () => {} }),
+        Button({ key: `stop:${status.name}`, label: '停止', onPress: () => {} }),
+      ],
+    })) })
+  })
+
+  on('ui.render', { component: 'Pane' }, ($, e, next) => {
+    if (e.requestId !== 'cx') return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    return Box({ flexDirection: 'column', children: [
+      ...recentJobs.map(job => Button({ key: `select:${job.name}`, label: `${job.name === selectedJob ? '▸ ' : ''}${job.label}`, onPress: () => {} })),
+      Box({ flexDirection: 'row', gap: 1, children: [
+        Button({ key: 'refresh', label: '刷新', onPress: () => {} }),
+        ...(selectedJob ? [Button({ key: `stop:${selectedJob}`, label: '停止', onPress: () => {} })] : []),
+      ] }),
+      Text({ children: selectedJob }),
+      Text({ children: jobOutput }),
+    ] })
+  })
+
+  on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
+    if (e.props.tool !== 'mcp__workhorse__cx') return next(e)
+    const { Text } = $.ui.resolve(e)
+    return Text({ wrap: 'truncate-end', children: toolLine(e.props.input as Input) })
+  })
+
+  on('ui.press', { plugin: 'workhorse' }, async ($, e, next) => {
+    if (e.element.startsWith('logs:')) {
+      selectedJob = e.element.slice(5)
+      await openPane($, options)
+    } else if (e.element.startsWith('select:')) {
+      selectedJob = e.element.slice(7)
+      await refreshPane($, options)
+    } else if (e.element.startsWith('stop:')) {
+      await stopJob($, options, e.element.slice(5))
+      if (e.component === 'Pane') await refreshPane($, options)
+    } else if (e.element === 'refresh') {
+      await refreshPane($, options)
+    } else {
+      return next(e)
+    }
+    return { element: e.element }
+  })
+
+  on('command.run', { command: 'cx' }, async $ => {
+    await openPane($, options)
+    return {}
   })
 
   on('tool.check', { tool: 'mcp__workhorse__cx' }, ($, e) => (e.input as Input).mode === 'ops'

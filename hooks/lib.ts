@@ -26,6 +26,7 @@ export type Job = {
 
 export type Status = {
   name: string
+  mode: string
   path: string
   state: 'running' | 'done' | 'dead' | 'missing'
   exit: number | null
@@ -35,6 +36,18 @@ export type Status = {
   tests: number
   tokens: number
   report: string
+}
+
+export function jobRows(output: string): { name: string; label: string }[] {
+  return output.split('\n').filter(line => line.trim()).map(line => ({ name: line.trim().split(/\s+/)[0]!, label: line.trim() }))
+}
+
+export function statusLine(status: Status): string {
+  return `${status.name} · ${status.mode} · ${status.elapsed_min}m · cmds ${status.cmds} · tests ${status.tests} · idle ${status.idle_min}m`
+}
+
+export function toolLine(input: Input): string {
+  return `cx ▸ ${input.name || input.resume || 'auto'} · ${input.mode ?? 'code'} · ${input.effort ?? 'default'} — ${Array.from(input.goal).slice(0, 80).join('').replace(/\s+/g, ' ')}`
 }
 
 export function lint(input: Input, banned: string): string | undefined {
