@@ -211,6 +211,64 @@ test('stall and excess-test warnings each notify only once', async ($, on) => {
   expect(messages[1]).toContain('3 次测试')
 })
 
+test('long commands warn once per command text without terminating', { options: { command_minutes: 2 } }, async ($, on) => {
+  const { clock, store } = setup(on)
+  store['job:/jobs/slow'] = { name: 'slow', session: 'session-1', goal: 'fix', doneWhen: 'unit test', warnedStall: false, warnedTests: false }
+  const messages: string[] = []
+  const toasts: string[] = []
+  let busy = 'sleep 600'
+  let busyMinutes = 1
+  on('process.run', ($, e) => {
+    expect(e.argv[1]).toBe('-s')
+    return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify([{ name: 'slow', path: '/jobs/slow', state: 'running', busy, busy_min: busyMinutes, idle_min: 10, tests: 0 }]) } }
+  })
+  on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: 1, isLink: false } }))
+  on('fs.exists', () => ({ value: false }))
+  on('prompt.submit', ($, e) => { messages.push(e.text); return { text: e.text } })
+  on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
+  await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
+  await clock.advance(30000)
+  expect(messages).toHaveLength(0)
+  busyMinutes = 2
+  await clock.advance(60000)
+  expect(messages).toHaveLength(1)
+  expect(messages[0]).toContain('2 分钟：sleep 600')
+  busy = 'sleep 900'
+  await clock.advance(60000)
+  expect(messages).toHaveLength(2)
+  expect(messages[1]).toContain('sleep 900')
+  expect(toasts).toEqual(messages)
+  expect(store['job:/jobs/slow']).toMatchObject({ warnedBusy: 'sleep 900' })
+})
+
+test('failed completion submissions keep records until the next successful poll', async ($, on) => {
+  const { clock, store } = setup(on)
+  const states = ['done', 'dead', 'missing']
+  for (const name of states) {
+    store[`job:/jobs/${name}`] = { name, session: 'session-1', goal: 'fix', doneWhen: 'unit test', warnedStall: false, warnedTests: false }
+  }
+  on('process.run', () => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify(states.map(state => ({ name: state, path: `/jobs/${state}`, state, mode: 'code', base: state }))) } }))
+  on('fs.read', () => ({ value: 'Finished report' }))
+  const messages: string[] = []
+  let fail = true
+  on('prompt.submit', ($, e) => {
+    const name = states.find(state => e.text.includes(`job ${state} `))!
+    expect(store[`job:/jobs/${name}`]).toBeDefined()
+    if (fail) throw new Error('submit unavailable')
+    messages.push(e.text)
+    return { text: e.text }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
+  await clock.advance(30000)
+  expect(Object.keys(store)).toEqual(states.map(name => `job:/jobs/${name}`))
+  expect(messages).toHaveLength(0)
+  fail = false
+  await clock.advance(30000)
+  expect(messages).toHaveLength(3)
+  expect(store).toEqual({})
+})
+
 test('missing jobs are removed and a failed job does not block other jobs', async ($, on) => {
   const { clock, store } = setup(on)
   const messages: string[] = []
@@ -248,7 +306,7 @@ test('two polls sharing a store submit a done review job only once', async ($, o
   ]) } }))
   on('fs.read', () => ({ value: 'Review evidence' }))
   on('prompt.submit', ($, e) => {
-    expect(store['job:/jobs/review.2']).toBeUndefined()
+    expect(store['job:/jobs/review.2']).toBeDefined()
     messages.push(e.text)
     return { text: e.text }
   })

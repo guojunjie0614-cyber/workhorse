@@ -124,8 +124,8 @@ async function poll($: EngineInterface, options: PluginOptions, state: SessionSt
       const status = polled.find(s => s.name === job.name)!
       if (status.state === 'missing') {
         if (!await $.store.get(key)) continue
+        await $.prompt.submit({ text: copy.missing(job.name) })
         await $.store.delete(key)
-        void $.prompt.submit({ text: copy.missing(job.name) })
       } else if (status.state === 'done' || status.state === 'dead') {
         const fullReport = status.state === 'done' ? await $.fs.read(`${status.path}/report.txt`) : ''
         const report = fullReport.slice(0, reportMaxChars) + (fullReport.length > reportMaxChars ? copy.truncated(status.path) : '')
@@ -137,9 +137,15 @@ async function poll($: EngineInterface, options: PluginOptions, state: SessionSt
               ? copy.opsReminder
               : copy.codeReminder(job.doneWhen, status.base)
         if (!await $.store.get(key)) continue
+        await $.prompt.submit({ text: copy.finished(job.name, report, reminder) })
         await $.store.delete(key)
-        void $.prompt.submit({ text: copy.finished(job.name, report, reminder) })
       } else if (status.state === 'running') {
+        if (status.busy && status.busy_min >= Number(options.command_minutes) && job.warnedBusy !== status.busy) {
+          const text = copy.longCommand(job.name, status.busy_min, status.busy)
+          await $.ui.toast(text)
+          await $.prompt.submit({ text })
+          job.warnedBusy = status.busy
+        }
         if (!status.busy && status.idle_min >= Number(options.stall_minutes) && !job.warnedStall) {
           job.warnedStall = true
           const text = copy.stalled(job.name, status.idle_min)

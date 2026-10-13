@@ -32,6 +32,7 @@ export const MESSAGES = {
     codeReminder: (doneWhen: string, base: string) => `对照 brief 读 diff，自己运行 ${doneWhen}；要修复就用 mcp__workhorse__run 工具 resume ${base} 交回`,
     finished: (name: string, report: string, reminder: string) => `workhorse: job ${name} 已结束\n${report}\n${reminder}`,
     stalled: (name: string, minutes: number) => `workhorse: job ${name} 已 ${minutes} 分钟无输出，用 workhorse -t ${name} 查看，卡住就 workhorse -k ${name} 后把 brief 缩小重派`,
+    longCommand: (name: string, minutes: number, command: string) => `workhorse: job ${name} 的命令已运行 ${minutes} 分钟：${command}；用 workhorse -t ${name} 查看，仅提醒，不会自动终止`,
     excessTests: (name: string, tests: number, max: number) => `workhorse: job ${name} 已运行 ${tests} 次测试，超过 max_tests=${max}；用 workhorse -t ${name} 查看，停止重复测试，必要时 workhorse -k ${name} 后缩小 brief 重派`,
     statusError: (name: string, error: string) => `workhorse: job ${name} 状态处理失败：${error}`,
     runDescription: '让 Codex 启动一个后台 job，一个 job 只做一个改动。调用后立即返回，报告会以 workhorse 消息的形式送达，不要轮询。根因不明时先用 mode=review，再用 resume + to_code 转成修复。brief 里不要写 baseline 或全量测试。',
@@ -59,6 +60,7 @@ export const MESSAGES = {
     codeReminder: (doneWhen: string, base: string) => `Read the diff against the brief and run ${doneWhen} yourself; for fixes, hand back with the mcp__workhorse__run tool using resume ${base}`,
     finished: (name: string, report: string, reminder: string) => `workhorse: job ${name} finished\n${report}\n${reminder}`,
     stalled: (name: string, minutes: number) => `workhorse: job ${name} has had no output for ${minutes} minutes; inspect with workhorse -t ${name}; if stuck, run workhorse -k ${name} and reassign with a smaller brief`,
+    longCommand: (name: string, minutes: number, command: string) => `workhorse: job ${name} command has run for ${minutes} minutes: ${command}; inspect with workhorse -t ${name}; warning only, no automatic termination`,
     excessTests: (name: string, tests: number, max: number) => `workhorse: job ${name} has run ${tests} test commands, exceeding max_tests=${max}; inspect with workhorse -t ${name}, stop repeated testing, and if needed run workhorse -k ${name} and reassign with a smaller brief`,
     statusError: (name: string, error: string) => `workhorse: job ${name} status handling failed: ${error}`,
     runDescription: 'Start a background Codex job for a single change. Returns immediately; the report arrives as a workhorse message. Do not poll. If the root cause is unknown, use mode=review first, then resume + to_code for fixes. Do not request baselines or full test suites in the brief.',
@@ -105,6 +107,7 @@ export type Job = {
   doneWhen: string
   warnedStall: boolean
   warnedTests: boolean
+  warnedBusy?: string
 }
 
 export type Status = {

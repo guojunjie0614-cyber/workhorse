@@ -42,6 +42,7 @@ Set them in `/plugin configure workhorse@workhorse`. Empty strings keep `workhor
 | `lang` | `WORKHORSE_LANG` | `zh`; `en` for English rule blocks, mod UI and notices (empty uses `zh` for the mod) |
 | `allow_ops` | `WORKHORSE_ALLOW_OPS` | `true` |
 | `stall_minutes`, `max_tests` | | `10`, `2` |
+| `command_minutes` | | `20` minutes before warning once per command text; never terminates the command |
 | `poll_seconds` | | `30` seconds between status polls |
 | `done_linger_minutes` | | `3` minutes to show finished jobs while others run |
 | `report_max_chars` | | `6000` report characters per completion notice |
