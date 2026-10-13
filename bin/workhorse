@@ -332,7 +332,13 @@ printf '%s\n' "$start" > "$out/start"
        < "$out/prompt.md" 2> "$out/codex.log")
   else
     codex exec "${cfg[@]}" -C "$dir" --json --skip-git-repo-check -o "$out/final.md" - < "$out/prompt.md" 2> "$out/codex.log"
-  fi | jq -c -R --unbuffered 'fromjson? // empty | . + {workhorse_time: now}' > "$out/events.jsonl"
+  fi | jq -c -R --unbuffered 'fromjson? // empty | . + {workhorse_time: now}' |
+    while IFS= read -r event; do
+      printf '%s\n' "$event"
+      [[ "$event" == *'"thread.started"'* ]] || continue
+      sid="$(jq -r 'select(.type == "thread.started") | .thread_id' <<< "$event")"
+      if [[ -n "$sid" ]]; then printf '%s\n' "$sid" > "$out/session.txt"; fi
+    done > "$out/events.jsonl"
 ) &
 echo $! > "$out/pid"
 wait $!; rc=$?
@@ -345,14 +351,14 @@ printf '%s\n' "${sid:-$session}" > "$out/session.txt"
        "$(jq -sr '[.[] | select(.type == "turn.completed") | .usage] | "tokens=\(map(.input_tokens - (.cached_input_tokens // 0) + .output_tokens) | add // 0) cached=\(map(.cached_input_tokens // 0) | add // 0)"' "$out/events.jsonl") cmds=$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$out/events.jsonl")" \
        "tests=$(jq -s --arg tests "$WORKHORSE_TEST_PATTERN" --argjson summary_chars "$SUMMARY_CHARS" "$COMMAND_JQ"'[.[] | select(.type == "item.completed" and .item.type == "command_execution") | select(.item.command | is_test)] | length' "$out/events.jsonl")"
   [[ -n "$session" && -n "$sid" && "$sid" != "$session" ]] && echo "!! resume started a new thread; context did not carry over"
-  (( rc )) && tail -n "$LOG_TAIL_LINES" "$out/codex.log"
-  cat "$out/final.md" 2>/dev/null; echo
   if (( isgit )) && [[ -n "$pre" ]]; then
     post="$(snap "$dir")"
     if [[ "$pre" == "$post" ]]; then echo "(no file changes)"
     else git -C "$dir" diff --stat "$pre" "$post" | tail -n "$DIFF_LINES"; fi
   fi
   [[ -n "$wt" ]] && echo "worktree: $dir (branch $branch)"
+  (( rc )) && tail -n "$LOG_TAIL_LINES" "$out/codex.log"
+  cat "$out/final.md" 2>/dev/null; echo
 } | if (( detach )); then cat > "$out/report.tmp"; else tee "$out/report.tmp"; fi
 mv "$out/report.tmp" "$out/report.txt"
 rm -f "$out/finishing" "$out/pid"
