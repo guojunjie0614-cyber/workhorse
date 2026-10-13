@@ -15,6 +15,7 @@
 
 <default_follow_through_policy>
 有歧义时取最直接、低风险的理解，继续做，在报告里用一句话说明。只有缺失信息会影响正确性或导致不可逆操作时才停下来问。
+通用流程技能（karpathy-guidelines、code-review、diagnosing-bugs、tdd）的要求已包含在这些规则里，不要再读它们的 SKILL.md；领域技能照常按需使用。
 </default_follow_through_policy>
 
 <compact_output_contract>
