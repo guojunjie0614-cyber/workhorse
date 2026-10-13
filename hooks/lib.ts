@@ -65,13 +65,21 @@ export function panelLines(tasks: PanelTask[], now: number): Segment[][] {
   ]
 }
 
+const wide = [[0x1100, 0x115f], [0x2e80, 0xa4cf], [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe30, 0xfe4f], [0xff00, 0xff60], [0xffe0, 0xffe6], [0x1f300, 0x1faff], [0x20000, 0x3fffd]]
+
+function charWidth(char: string): number {
+  const code = char.codePointAt(0)!
+  if (code < 0x20 || (code >= 0x300 && code <= 0x36f) || code === 0x200b) return 0
+  return wide.some(([low, high]) => code >= low! && code <= high!) ? 2 : 1
+}
+
 function width(text: string): number {
-  return Array.from(text).reduce((sum, char) => sum + (char.codePointAt(0)! >= 0x1100 ? 2 : 1), 0)
+  return Array.from(text).reduce((sum, char) => sum + charWidth(char), 0)
 }
 
 function pad(text: string, columns: number): string {
   let out = ''
-  for (const char of text) {
+  for (const char of text.replace(/\s+/g, ' ')) {
     if (width(out + char) > columns) break
     out += char
   }
@@ -84,7 +92,7 @@ function taskLines(status: PanelTask, now: number, frame: number, star: string, 
   const elapsed = seconds < 60 ? `${seconds}s`
     : minutes < 60 ? `${minutes}m${String(seconds % 60).padStart(2, '0')}s`
       : `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, '0')}m`
-  const progress = status.state === 'done' ? 1 : status.steps > 0 ? status.step / status.steps : undefined
+  const progress = status.state === 'done' ? 1 : status.steps > 0 ? Math.min(1, Math.max(0, status.step / status.steps)) : undefined
   const filled = progress === undefined ? 4 : Math.round(progress * 20)
   const offset = progress === undefined ? 16 - Math.abs(frame % 32 - 16) : 0
   const failed = status.state === 'dead'
