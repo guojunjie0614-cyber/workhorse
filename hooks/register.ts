@@ -1,5 +1,5 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
-import { argv, brief, environment, jobRows, lint, panelLines, started, toolLine } from './lib'
+import { argv, brief, environment, FRAME_MS, jobRows, lint, messages, MS_PER_MINUTE, MS_PER_SECOND, panelLines, started, toolLine } from './lib'
 import type { Input, Job, PanelTask, Status } from './lib'
 
 async function refreshPane($: EngineInterface, options: PluginOptions) {
@@ -64,6 +64,9 @@ async function pollOnce($: EngineInterface, options: PluginOptions) {
 }
 
 async function poll($: EngineInterface, options: PluginOptions, state: SessionState) {
+  const copy = messages(String(options.lang))
+  const lingerMs = Number(options.done_linger_minutes) * MS_PER_MINUTE
+  const reportMaxChars = Number(options.report_max_chars)
   const session = await $.session.id()
   const now = await $.clock.now()
   const owned: [string, Job][] = []
@@ -73,7 +76,7 @@ async function poll($: EngineInterface, options: PluginOptions, state: SessionSt
     if (job?.session === session) owned.push([key, job])
   }
   if (!owned.length) {
-    state.statuses = state.statuses.filter(status => status.completedAt !== undefined && now - status.completedAt < 180000)
+    state.statuses = state.statuses.filter(status => status.completedAt !== undefined && now - status.completedAt < lingerMs)
     state.ticking?.cancel()
     state.ticking = undefined
     $.ui.invalidate('ui.render')
@@ -92,13 +95,13 @@ async function poll($: EngineInterface, options: PluginOptions, state: SessionSt
     ...state.statuses.flatMap(previous => {
       const current = fresh.find(status => status.name === previous.name)
       if (current) return [current]
-      return previous.completedAt !== undefined && now - previous.completedAt < 180000 ? [previous] : []
+      return previous.completedAt !== undefined && now - previous.completedAt < lingerMs ? [previous] : []
     }),
     ...fresh.filter(status => !state.statuses.some(previous => previous.name === status.name)),
   ]
   $.ui.invalidate('ui.render')
   if (polled.some(status => status.state === 'running')) {
-    state.ticking ??= $.clock.every(250, async () => {
+    state.ticking ??= $.clock.every(FRAME_MS, async () => {
       $.ui.invalidate('ui.render')
       for (const status of state.statuses) {
         if (status.state !== 'running') continue
@@ -122,42 +125,43 @@ async function poll($: EngineInterface, options: PluginOptions, state: SessionSt
       if (status.state === 'missing') {
         if (!await $.store.get(key)) continue
         await $.store.delete(key)
-        void $.prompt.submit({ text: `workhorse: job ${job.name} 记录已丢失` })
+        void $.prompt.submit({ text: copy.missing(job.name) })
       } else if (status.state === 'done' || status.state === 'dead') {
         const fullReport = status.state === 'done' ? await $.fs.read(`${status.path}/report.txt`) : ''
-        const report = fullReport.slice(0, 6000) + (fullReport.length > 6000 ? `\n已截断，完整报告见 ${status.path}/report.txt` : '')
+        const report = fullReport.slice(0, reportMaxChars) + (fullReport.length > reportMaxChars ? copy.truncated(status.path) : '')
         const reminder = status.state === 'dead'
-          ? `用 workhorse -t ${job.name} 看日志`
+          ? copy.deadReminder(job.name)
           : status.mode === 'review'
-            ? `核对结论和证据；要修复就用 resume ${status.base} + to_code 交回`
+            ? copy.reviewReminder(status.base)
             : status.mode === 'ops'
-              ? '核对产物和远端状态，不要重复执行部署'
-              : `对照 brief 读 diff，自己运行 ${job.doneWhen}；要修复就用 mcp__workhorse__run 工具 resume ${status.base} 交回`
+              ? copy.opsReminder
+              : copy.codeReminder(job.doneWhen, status.base)
         if (!await $.store.get(key)) continue
         await $.store.delete(key)
-        void $.prompt.submit({ text: `workhorse: job ${job.name} finished\n${report}\n${reminder}` })
+        void $.prompt.submit({ text: copy.finished(job.name, report, reminder) })
       } else if (status.state === 'running') {
         if (!status.busy && status.idle_min >= Number(options.stall_minutes) && !job.warnedStall) {
           job.warnedStall = true
-          const text = `workhorse: job ${job.name} 已 ${status.idle_min} 分钟无输出，用 workhorse -t ${job.name} 查看，卡住就 workhorse -k ${job.name} 后把 brief 缩小重派`
+          const text = copy.stalled(job.name, status.idle_min)
           await $.ui.toast(text)
           void $.prompt.submit({ text })
         }
         if (status.tests > Number(options.max_tests) && !job.warnedTests) {
           job.warnedTests = true
-          const text = `workhorse: job ${job.name} 已运行 ${status.tests} 次测试，超过 max_tests=${options.max_tests}；用 workhorse -t ${job.name} 查看，停止重复测试，必要时 workhorse -k ${job.name} 后缩小 brief 重派`
+          const text = copy.excessTests(job.name, status.tests, Number(options.max_tests))
           await $.ui.toast(text)
           void $.prompt.submit({ text })
         }
         if (await $.store.get(key)) await $.store.set(key, job)
       }
     } catch (error) {
-      await $.ui.toast(`workhorse: job ${job.name} 状态处理失败：${String(error)}`)
+      await $.ui.toast(copy.statusError(job.name, String(error)))
     }
   }
 }
 
 export const register: Register = (on, options) => {
+  const copy = messages(String(options.lang))
   on('agent.offer', ($, e, next) => {
     if (options.hide_codex_rescue && e.agent === 'codex:codex-rescue') return { isOffered: false }
     return next(e)
@@ -167,27 +171,27 @@ export const register: Register = (on, options) => {
     sessionState(await $.session.id(), true)
     await $.tool.register({
       name: 'run',
-      description: '让 Codex 启动一个后台 job，一个 job 只做一个改动。调用后立即返回，报告会以 workhorse 消息的形式送达，不要轮询。根因不明时先用 mode=review，再用 resume + to_code 转成修复。brief 里不要写 baseline 或全量测试。',
+      description: copy.runDescription,
       inputSchema: {
         type: 'object',
         properties: {
           goal: { type: 'string' }, context: { type: 'string' }, done_when: { type: 'string' },
           constraints: { type: 'string' }, mode: { type: 'string', enum: ['code', 'review', 'ops'], default: 'code' },
           dir: { type: 'string' }, worktree: { type: 'string' }, name: { type: 'string' }, resume: { type: 'string' },
-          to_code: { type: 'boolean' }, effort: { type: 'string', enum: ['low', 'medium', 'high'] }, model: { type: 'string' },
+          to_code: { type: 'boolean' }, effort: { type: 'string', description: copy.effortDescription }, model: { type: 'string' },
         },
         required: ['goal', 'context', 'done_when'],
       },
     })
-    await $.command.register({ name: 'workhorse-jobs', description: 'Open and list Codex jobs', immediate: true })
-    await $.command.register({ name: 'workhorse-kill', description: 'Kill a Codex job', argumentHint: '<name>', immediate: true })
-    $.clock.every(30000, () => pollOnce($, options))
+    await $.command.register({ name: 'workhorse-jobs', description: copy.jobsDescription, immediate: true })
+    await $.command.register({ name: 'workhorse-kill', description: copy.killDescription, argumentHint: copy.killArgumentHint, immediate: true })
+    $.clock.every(Number(options.poll_seconds) * MS_PER_SECOND, () => pollOnce($, options))
     return next(e)
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const now = await $.clock.now()
-    const lines = panelLines(sessionState(await $.session.id()).statuses, now, e.props.bodyColumns)
+    const lines = panelLines(sessionState(await $.session.id()).statuses, now, options, e.props.bodyColumns)
     if (!lines.length) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     return Box({ flexDirection: 'column', children: lines.map(line => Text({ wrap: 'truncate-end', children: line.map(segment => Text({ color: 'text', ...segment })) })) })
@@ -200,7 +204,7 @@ export const register: Register = (on, options) => {
     return Box({ flexDirection: 'column', children: [
       ...recentJobs.map(job => Button({ key: `select:${job.name}`, label: `${job.name === selectedJob ? '▸ ' : ''}${job.label}`, onPress: () => {} })),
       Box({ flexDirection: 'row', gap: 1, children: [
-        Button({ key: 'refresh', label: '刷新', onPress: () => {} }),
+        Button({ key: 'refresh', label: copy.refresh, onPress: () => {} }),
       ] }),
       Text({ color: 'text', bold: true, children: selectedJob }),
       Text({ color: 'text', children: jobOutput }),
@@ -210,12 +214,12 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
     if (e.props.tool !== 'mcp__workhorse__run') return next(e)
     const { Text } = $.ui.resolve(e)
-    return Text({ color: 'text', wrap: 'truncate-end', children: toolLine(e.props.input as Input) })
+    return Text({ color: 'text', wrap: 'truncate-end', children: toolLine(e.props.input as Input, String(options.lang)) })
   })
 
   on('ui.press', { plugin: 'workhorse' }, async ($, e, next) => {
     if (e.element.startsWith('select:')) {
-      sessionState(await $.session.id()).selectedJob = e.element.slice(7)
+      sessionState(await $.session.id()).selectedJob = e.element.slice('select:'.length)
       await refreshPane($, options)
     } else if (e.element === 'refresh') {
       await refreshPane($, options)
@@ -238,14 +242,14 @@ export const register: Register = (on, options) => {
       }
     }
     return mode === 'ops'
-      ? { decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' }
+      ? { decision: 'ask', reason: copy.opsPermission }
       : { decision: 'allow' }
   })
 
   on('tool.call', { tool: 'mcp__workhorse__run' }, async ($, e) => {
     const { tool, tool_use_id, agentId, ...args } = e
     const input = args as Input
-    const deny = lint(input, String(options.banned_phrases))
+    const deny = lint(input, String(options.banned_phrases), String(options.lang))
     if (deny) return { deny }
     const cwd = input.dir || await $.session.cwd()
     const result = await $.process.run(argv($.plugin.root, input, cwd), { cwd, env: environment(options), stdin: brief(input) })
@@ -255,7 +259,7 @@ export const register: Register = (on, options) => {
     void pollOnce($, options)
     const lines = result.stdout.split('\n')
     const warnings = lines.slice(lines.findIndex(line => line.startsWith('started ')) + 1).filter(line => line.startsWith('warning:'))
-    return { result: [`started ${job.name}; 报告会以 workhorse 消息送达，不要轮询。`, ...warnings].join('\n') }
+    return { result: [copy.launched(job.name), ...warnings].join('\n') }
   })
 
   on('command.run', { command: 'workhorse-jobs' }, async $ => {
@@ -271,11 +275,11 @@ export const register: Register = (on, options) => {
         const job = await $.store.get(key) as Job
         if (job.session === session) names.push(job.name)
       }
-      if (!names.length) return { text: '本会话没有运行中的 workhorse 任务。' }
+      if (!names.length) return { text: copy.noRunning }
       const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-s', ...names], { env: environment(options) })
       const running = (JSON.parse(result.stdout) as Status[]).filter(status => status.state === 'running')
-      if (!running.length) return { text: '本会话没有运行中的 workhorse 任务。' }
-      if (running.length > 1) return { text: `本会话有多个运行中的任务，请用 /workhorse-kill <name> 指名：\n${running.map(status => status.name).join('\n')}` }
+      if (!running.length) return { text: copy.noRunning }
+      if (running.length > 1) return { text: copy.multipleRunning(running.map(status => status.name)) }
       name = running[0]!.name
     }
     const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-k', name], { env: environment(options) })

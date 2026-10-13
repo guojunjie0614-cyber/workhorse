@@ -52,7 +52,7 @@ test('running band refreshes elapsed seconds without stop or logs buttons', asyn
   await ui.unmount()
 })
 
-test('panel follows events live and disappears once every job is done', async ($, on) => {
+test('panel follows events live and disappears once every job is done', { options: { lang: 'en', done_linger_minutes: 0.01 } }, async ($, on) => {
   const { clock, store } = setup(on)
   on('fs.exists', () => ({ value: false }))
   let mtime = 1
@@ -80,6 +80,8 @@ test('panel follows events live and disappears once every job is done', async ($
   mtime = 2
   await clock.advance(250)
   expect(await ui.find({ type: 'Text', text: '│    rg -n parse src · 4 cmds · 2 files' })).toBeDefined()
+  await clock.advance(250)
+  expect(await ui.find({ type: 'Text', text: '1 agents · 1 running · 0 done' })).toBeDefined()
   done = true
   mtime = 3
   await clock.advance(250)
@@ -88,7 +90,7 @@ test('panel follows events live and disappears once every job is done', async ($
   await ui.unmount()
 })
 
-test('a session sees only its own jobs in the band', async ($, on) => {
+test('a session sees only its own jobs in the band', { options: { lang: 'en' } }, async ($, on) => {
   const { clock, store, session } = setup(on)
   on('fs.exists', () => ({ value: false }))
   on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: 1, isLink: false } }))
@@ -136,7 +138,7 @@ test('lint refuses absent completion criteria and banned phrases in instruction 
   expect(lint({ goal: 'notable baseline', context: '', done_when: 'unit test' }, 'baseline')).toContain('goal')
 })
 
-test('launch writes argv, stdin and job; completion delivers report and acceptance command', async ($, on) => {
+test('launch writes argv, stdin and job; completion delivers report and acceptance command', { options: { lang: 'en', poll_seconds: 1, report_max_chars: 6, keep_days: 7, skip_skills: '', test_pattern: 'unit' } }, async ($, on) => {
   const { clock, store } = setup(on)
   const calls: unknown[] = []
   const messages: string[] = []
@@ -152,30 +154,30 @@ test('launch writes argv, stdin and job; completion delivers report and acceptan
   })
   on('prompt.submit', ($, e) => { messages.push(e.text); return { text: e.text } })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  const input = { goal: 'fix parser', context: 'baseline.ts rejects input', constraints: 'only parser', done_when: 'npm run test:parser', name: 'patch', effort: 'high' as const, model: 'codex' }
+  const input = { goal: 'fix parser', context: 'baseline.ts rejects input', constraints: 'only parser', done_when: 'npm run test:parser', name: 'patch', effort: 'xhigh', model: 'codex' }
   const result = await $.tool.call({ tool: 'mcp__workhorse__run', ...input })
   expect(result.result).toContain('patch')
   expect(calls[0]).toEqual({
-    argv: [expect.stringMatching(/\/bin\/workhorse$/), '--detach', '-C', '/repo', '--code', '-n', 'patch', '-e', 'high', '-m', 'codex'],
-    init: { cwd: '/repo', env: { WORKHORSE_ALLOW_OPS: '1' }, stdin: 'Goal: fix parser\nContext: baseline.ts rejects input\nConstraints: only parser\nDone when: npm run test:parser' },
+    argv: [expect.stringMatching(/\/bin\/workhorse$/), '--detach', '-C', '/repo', '--code', '-n', 'patch', '-e', 'xhigh', '-m', 'codex'],
+    init: { cwd: '/repo', env: { WORKHORSE_ALLOW_OPS: '1', WORKHORSE_LANG: 'en', WORKHORSE_KEEP_DAYS: '7', WORKHORSE_SKIP_SKILLS: '', WORKHORSE_TEST_PATTERN: 'unit' }, stdin: 'Goal: fix parser\nContext: baseline.ts rejects input\nConstraints: only parser\nDone when: npm run test:parser' },
   })
   expect(store).toEqual({ 'job:/jobs/patch': { name: 'patch', session: 'session-1', goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false } })
-  expect(argv('/plugin', { ...input, resume: 'review', to_code: true }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-r', 'review', '--code', '-e', 'high', '-m', 'codex'])
+  expect(argv('/plugin', { ...input, resume: 'review', to_code: true }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-r', 'review', '--code', '-e', 'xhigh', '-m', 'codex'])
   for (const mode of ['code', 'review', 'ops'] as const) {
     expect(argv('/plugin', { goal: 'fix', context: '', done_when: 'unit test', resume: 'job', mode, to_code: true }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-r', 'job', `--${mode}`])
   }
-  expect(argv('/plugin', { ...input, worktree: 'branch', mode: 'review' }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-w', 'branch', '--review', '-n', 'patch', '-e', 'high', '-m', 'codex'])
-  await clock.advance(30000)
-  expect(calls[1]).toEqual({ argv: [expect.stringMatching(/\/bin\/workhorse$/), '-s', 'patch'], init: { env: { WORKHORSE_ALLOW_OPS: '1' } } })
+  expect(argv('/plugin', { ...input, worktree: 'branch', mode: 'review' }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-w', 'branch', '--review', '-n', 'patch', '-e', 'xhigh', '-m', 'codex'])
+  await clock.advance(1000)
+  expect(calls[1]).toEqual({ argv: [expect.stringMatching(/\/bin\/workhorse$/), '-s', 'patch'], init: { env: { WORKHORSE_ALLOW_OPS: '1', WORKHORSE_LANG: 'en', WORKHORSE_KEEP_DAYS: '7', WORKHORSE_SKIP_SKILLS: '', WORKHORSE_TEST_PATTERN: 'unit' } } })
   expect(messages).toHaveLength(1)
-  expect(messages[0]).toContain('Fixed the parser')
+  expect(messages[0]).toContain('workhorse: job patch finished\nFixed \nTruncated; full report: /jobs/patch/report.txt')
   expect(messages[0]).toContain(input.done_when)
   expect(store).toEqual({})
   expect(brief({ goal: 'fix', context: 'baseline.ts', done_when: 'unit test' })).toBe('Goal: fix\nContext: baseline.ts\nDone when: unit test')
   expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { mode: 'ops' } })).toEqual({ decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' })
 })
 
-test('resuming an ops job asks first unless it becomes a code job', async ($, on) => {
+test('resuming an ops job asks first unless it becomes a code job', { options: { lang: 'en' } }, async ($, on) => {
   setup(on)
   on('process.run', ($, e) => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify([{ name: e.argv[2], mode: e.argv[2] === 'deploy' ? 'ops' : 'code' }]) } }))
   const ask = { decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' }
@@ -266,7 +268,7 @@ test('panel shows failed exits, family rounds and busy commands', () => {
     { ...task, name: 'failed', base: 'failed', round: 1, state: 'done', exit: 1, busy: '' },
     { ...task, name: 'ok', base: 'ok', round: 1, state: 'done', exit: 0, busy: '' },
     { ...task, name: 'dead', base: 'dead', round: 1, state: 'dead', busy: '' },
-  ], 600000)
+  ], 600000, { lang: 'en', done_linger_minutes: 3, goal_columns: 40 })
   expect(lines[1]![0]!.children).toBe('4 agents · 1 running · 1 done · 2 failed')
   expect(lines[2]![2]!.children).toContain('patch #2')
   expect(lines[3]![0]!.children).toContain('running 10m: sleep 600')
