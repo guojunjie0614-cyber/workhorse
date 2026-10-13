@@ -131,7 +131,7 @@ case "${1:-}" in
     j="$root/${2:?usage: workhorse --clean name}"; w="$(cat "$j/worktree.txt" 2>/dev/null)"
     [[ -n "$w" ]] || { echo "workhorse: job '$2' has no worktree" >&2; exit 2; }
     main="$(cat "$j/repo.txt")"
-    branch="$(cat "$j/branch.txt")"
+    branch="$(cat "$j/branch.txt" 2>/dev/null || echo "workhorse/$2")"
     git -C "$main" merge-base --is-ancestor "$branch" HEAD || { echo "workhorse: branch $branch is not merged into $(git -C "$main" branch --show-current); merge it first" >&2; exit 2; }
     git -C "$main" worktree remove "$w" && git -C "$main" branch -d "$branch"; exit $? ;;
 esac
