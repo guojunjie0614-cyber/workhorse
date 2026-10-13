@@ -39,9 +39,16 @@ Set them in `/plugin configure workhorse@workhorse`. Empty strings keep `workhor
 | `effort_code`, `effort_review`, `effort_ops` | `WORKHORSE_EFFORT_CODE`, ... | `medium`, `high`, `high` |
 | `fast_match` | `WORKHORSE_FAST_MATCH` | `*sol*`: matching models run on the Fast tier and default to high effort (`-e` or a resumed job's effort wins) |
 | `disable_mcp` | `WORKHORSE_DISABLE_MCP` | `node_repl` |
-| `lang` | `WORKHORSE_LANG` | `zh`; `en` for English rule blocks |
+| `lang` | `WORKHORSE_LANG` | `zh`; `en` for English rule blocks, mod UI and notices (empty uses `zh` for the mod) |
 | `allow_ops` | `WORKHORSE_ALLOW_OPS` | `true` |
 | `stall_minutes`, `max_tests` | | `10`, `2` |
+| `poll_seconds` | | `30` seconds between status polls |
+| `done_linger_minutes` | | `3` minutes to show finished jobs while others run |
+| `report_max_chars` | | `6000` report characters per completion notice |
+| `goal_columns` | | `40` terminal columns maximum for job goals |
+| `keep_days` | `WORKHORSE_KEEP_DAYS` | `14` days of job history retained by cleanup |
+| `skip_skills` | `WORKHORSE_SKIP_SKILLS` | `karpathy-guidelines,code-review,diagnosing-bugs,tdd`; unlike other strings, empty is passed through and disables skill skipping |
+| `test_pattern` | `WORKHORSE_TEST_PATTERN` | Empty: use the engine's default test-command pattern |
 | `banned_phrases` | | `baseline,全量测试,full test suite,前后对比,before/after` |
 | `hide_codex_rescue` | | `true` |
 
