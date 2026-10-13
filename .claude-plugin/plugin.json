@@ -2,5 +2,20 @@
   "name": "workhorse",
   "version": "0.1.0",
   "description": "Hand coding, review and ops jobs to Codex as background subagents, with a job board, stall watchdog and completion notices",
-  "author": { "name": "mac_max" }
+  "author": { "name": "mac_max" },
+  "userConfig": {
+    "model_code": { "type": "string", "title": "Code model", "default": "", "description": "Code model" },
+    "model_review": { "type": "string", "title": "Review model", "default": "", "description": "Review model" },
+    "model_ops": { "type": "string", "title": "Ops model", "default": "", "description": "Ops model" },
+    "effort_code": { "type": "string", "title": "Code effort", "default": "", "description": "Code effort" },
+    "effort_review": { "type": "string", "title": "Review effort", "default": "", "description": "Review effort" },
+    "effort_ops": { "type": "string", "title": "Ops effort", "default": "", "description": "Ops effort" },
+    "fast_match": { "type": "string", "title": "Fast model matching", "default": "", "description": "Fast model matching" },
+    "disable_mcp": { "type": "string", "title": "Disabled MCP servers", "default": "", "description": "Disabled MCP servers" },
+    "lang": { "type": "string", "title": "Job language", "default": "", "description": "Job language" },
+    "allow_ops": { "type": "boolean", "title": "Allow ops jobs", "default": true, "description": "Allow ops jobs" },
+    "stall_minutes": { "type": "number", "title": "Idle minutes before warning", "default": 10, "description": "Idle minutes before warning" },
+    "max_tests": { "type": "number", "title": "Test commands before warning", "default": 2, "description": "Test commands before warning" },
+    "banned_phrases": { "type": "string", "title": "Comma-separated forbidden brief phrases", "default": "baseline,全量测试,full test suite,前后对比,before/after", "description": "Comma-separated forbidden brief phrases" }
+  }
 }
