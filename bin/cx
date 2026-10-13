@@ -19,6 +19,49 @@ snap() { local idx; idx="$(mktemp)"; rm -f "$idx"
 TESTS='pytest|py\.test|unittest|(npm|pnpm|yarn|bun) (run )?test|vitest|jest|go test|cargo test|ctest|make (check|test)|tox|nox|rspec'
 
 case "${1:-}" in
+  -s)
+    shift
+    if (( $# == 0 )); then
+      for j in "$root"/*; do
+        [[ -d "$j" && ! -f "$j/report.txt" ]] && alive "$j" && set -- "$@" "${j##*/}"
+      done
+    fi
+    now=$(date +%s)
+    for name in "$@"; do
+      j="$root/$name"
+      if [[ ! -d "$j" ]]; then
+        jq -n --arg name "$name" '{name: $name, state: "missing"}'
+        continue
+      fi
+      report=""
+      if [[ -f "$j/report.txt" ]]; then
+        state=done; report=$(head -1 "$j/report.txt")
+      elif alive "$j"; then state=running
+      else state=dead; fi
+      if [[ -f "$j/start" ]]; then started=$(cat "$j/start")
+      else started=$(perl -e 'print((stat shift)[9])' "$j"); fi
+      log=/dev/null; modified=$started
+      if [[ -f "$j/events.jsonl" ]]; then
+        log="$j/events.jsonl"
+        modified=$(perl -e 'print((stat shift)[9])' "$log")
+      fi
+      jq -s --arg name "$name" --arg path "$(cd "$j" && pwd)" \
+        --arg dir "$(cat "$j/dir.txt" 2>/dev/null)" \
+        --arg state "$state" --arg mode "$(cat "$j/mode.txt" 2>/dev/null)" \
+        --arg model "$(cat "$j/model.txt" 2>/dev/null)" --arg effort "$(cat "$j/effort.txt" 2>/dev/null)" \
+        --arg report "$report" --arg tests "$TESTS" --argjson started "$started" \
+        --argjson elapsed "$(( (now - started) / 60 ))" --argjson idle "$(( (now - modified) / 60 ))" '
+        [.[] | select(.type == "item.completed" and .item.type == "command_execution")] as $commands |
+        {name: $name, path: $path, dir: $dir, state: $state, mode: $mode, model: $model, effort: $effort,
+         exit: (if $state == "done" then ($report | capture(" exit=(?<code>-?[0-9]+) ").code | tonumber) else null end),
+         started: $started, elapsed_min: $elapsed, idle_min: $idle,
+         cmds: ($commands | length),
+         tests: ([$commands[] | select(.item.command | test($tests))] | length),
+         tokens: (map(select(.type == "turn.completed") | .usage.input_tokens + .usage.output_tokens) | add // 0),
+         last_cmds: ([.[] | select(.type == "item.started" and .item.type == "command_execution") | .item.command] | .[-5:]),
+         report: (if $state == "done" then $report else null end)}' "$log"
+    done | jq -s '.'
+    exit 0 ;;
   -l)
     for d in $(ls -t "$root" | grep -v '^LAST$' | head -20); do
       j="$root/$d"
