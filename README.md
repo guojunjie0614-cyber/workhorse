@@ -4,14 +4,7 @@
 
 `workhorse` 是一个 Claude Code 插件，用于将编码实现、代码审查和运维操作以子代理方式委托给后台的 Codex 处理。Claude 负责撰写四段式 brief 并把关 diff 与验收，Codex 在后台异步执行，任务完成后将报告送回会话，避免轮询与等待。
 
-```
-✻ Working…
-2 agents · 2 running · 0 done
-├─ ✻ demo-fix     修复加法错误    running    21s
-│    已把 a - b 改为 a + b · 3 cmds · 1 files
-└─ ✻ demo-review  审查计算器缺口  running    21s
-     nl -ba calc.py · 2 cmds · 0 files
-```
+<p align="center"><img src="docs/demo.png" alt="三个 workhorse 任务并行运行：工具调用行显示任务名、模式、强度和中文说明，提示框上方的面板实时显示每个任务的状态和耗时" width="720"></p>
 
 # 仓库内容
 
