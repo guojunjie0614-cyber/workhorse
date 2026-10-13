@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Hand coding, review and ops jobs to Codex as background subagents from Claude Code.",
-    "version": "0.1.6"
+    "version": "0.1.7"
   },
   "plugins": [
     {
       "name": "workhorse",
       "description": "Hand coding, review and ops jobs to Codex as background subagents, with a job board, stall watchdog and completion notices",
-      "version": "0.1.6",
+      "version": "0.1.7",
       "author": {
         "name": "mac_max"
       },
