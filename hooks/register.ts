@@ -134,7 +134,7 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     return Box({ flexDirection: 'column', children: running.map(status => Box({
       flexDirection: 'row', gap: 1, children: [
-        Text({ color: status.idle_min >= Number(options.stall_minutes) || status.tests > Number(options.max_tests) ? 'red' : undefined, children: statusLine(status) }),
+        Text({ color: status.idle_min >= Number(options.stall_minutes) || status.tests > Number(options.max_tests) ? 'error' : 'text', children: statusLine(status) }),
         Button({ key: `logs:${status.name}`, label: '日志', onPress: () => {} }),
         Button({ key: `stop:${status.name}`, label: '停止', onPress: () => {} }),
       ],
@@ -150,15 +150,15 @@ export const register: Register = (on, options) => {
         Button({ key: 'refresh', label: '刷新', onPress: () => {} }),
         ...(selectedJob ? [Button({ key: `stop:${selectedJob}`, label: '停止', onPress: () => {} })] : []),
       ] }),
-      Text({ children: selectedJob }),
-      Text({ children: jobOutput }),
+      Text({ color: 'text', bold: true, children: selectedJob }),
+      Text({ color: 'text', children: jobOutput }),
     ] })
   })
 
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
     if (e.props.tool !== 'mcp__workhorse__run') return next(e)
     const { Text } = $.ui.resolve(e)
-    return Text({ wrap: 'truncate-end', children: toolLine(e.props.input as Input) })
+    return Text({ color: 'text', wrap: 'truncate-end', children: toolLine(e.props.input as Input) })
   })
 
   on('ui.press', { plugin: 'workhorse' }, async ($, e, next) => {
