@@ -26,6 +26,10 @@ export type Job = {
 
 export type Status = {
   name: string
+  base: string
+  round: number
+  busy: string
+  busy_min: number
   mode: string
   path: string
   state: 'running' | 'done' | 'dead' | 'missing'
@@ -48,18 +52,21 @@ export function jobRows(output: string): { name: string; label: string }[] {
 export type PanelTask = Status & { goal: string; completedAt?: number }
 type Segment = { children: string; color?: 'claude' | 'success' | 'error' | 'inactive'; dimColor?: boolean }
 
-export function panelLines(tasks: PanelTask[], now: number): Segment[][] {
+export function panelLines(tasks: PanelTask[], now: number, columns = 120): Segment[][] {
   const visible = tasks.filter(task => task.state !== 'missing' && (task.completedAt === undefined || now - task.completedAt < 180000))
   if (!visible.some(task => task.state === 'running')) return []
   const frame = Math.floor(now / 250)
   const star = Array.from('·✢✳✶✻✽')[frame % 6]!
   const running = visible.filter(task => task.state === 'running').length
-  const done = visible.filter(task => task.state === 'done').length
-  const failed = visible.filter(task => task.state === 'dead').length
+  const nameWidth = Math.max(...visible.map(task => width(taskName(task))))
+  // Tree, star, gaps, state and elapsed take nameWidth + 25 cells; the goal gets the rest.
+  const goalWidth = Math.max(10, Math.min(Math.max(...visible.map(task => width(oneLine(task.goal)))), columns - nameWidth - 25))
+  const done = visible.filter(task => task.state === 'done' && task.exit === 0).length
+  const failed = visible.filter(task => task.state === 'dead' || (task.state === 'done' && task.exit !== 0)).length
   return [
     [{ children: `${star} Working…`, color: 'claude' }],
     [{ children: `${visible.length} agents · ${running} running · ${done} done${failed ? ` · ${failed} failed` : ''}`, dimColor: true }],
-    ...visible.flatMap((task, index) => taskLines(task, now, star, index === visible.length - 1, Math.max(...visible.map(t => width(t.name))))),
+    ...visible.flatMap((task, index) => taskLines(task, now, star, index === visible.length - 1, nameWidth, goalWidth)),
   ]
 }
 
@@ -75,6 +82,15 @@ function width(text: string): number {
   return Array.from(text).reduce((sum, char) => sum + charWidth(char), 0)
 }
 
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function fit(text: string, columns: number): string {
+  const line = oneLine(text)
+  return width(line) > columns ? pad(line, columns - 1) + '…' : pad(line, columns)
+}
+
 function pad(text: string, columns: number): string {
   let out = ''
   for (const char of text.replace(/\s+/g, ' ')) {
@@ -84,22 +100,26 @@ function pad(text: string, columns: number): string {
   return out + ' '.repeat(columns - width(out))
 }
 
-function taskLines(status: PanelTask, now: number, star: string, last: boolean, nameWidth: number): Segment[][] {
+function taskName(status: Status): string {
+  return status.base + (status.round > 1 ? ` #${status.round}` : '')
+}
+
+function taskLines(status: PanelTask, now: number, star: string, last: boolean, nameWidth: number, goalWidth: number): Segment[][] {
   const seconds = Math.floor((status.completedAt ?? now) / 1000 - status.started)
   const minutes = Math.floor(seconds / 60)
   const elapsed = seconds < 60 ? `${seconds}s`
     : minutes < 60 ? `${minutes}m${String(seconds % 60).padStart(2, '0')}s`
       : `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, '0')}m`
-  const failed = status.state === 'dead'
+  const failed = status.state === 'dead' || (status.state === 'done' && status.exit !== 0)
   return [
     [
       { children: last ? '└─ ' : '├─ ' },
       { children: status.state === 'running' ? star : failed ? '✗' : '✓', color: failed ? 'error' : status.state === 'done' ? 'success' : 'claude' },
-      { children: ` ${pad(status.name, nameWidth)}  ${pad(status.goal, 24)}  ` },
+      { children: ` ${pad(taskName(status), nameWidth)}  ${fit(status.goal, goalWidth)}  ` },
       { children: (failed ? 'failed' : status.state).padEnd(7), color: failed ? 'error' : 'claude' },
       { children: `  ${elapsed}` },
     ],
-    [{ children: `${last ? '   ' : '│  '}  ${status.activity} · ${status.cmds} cmds · ${status.files} files`, dimColor: true }],
+    [{ children: `${last ? '   ' : '│  '}  ${status.busy ? `running ${status.busy_min}m: ${status.busy}` : status.activity} · ${status.cmds} cmds · ${status.files} files`, dimColor: true }],
   ]
 }
 
@@ -111,7 +131,12 @@ export function lint(input: Input, banned: string): string | undefined {
   if (!input.done_when?.trim()) return 'done_when 必须填写明确的完成条件'
   for (const phrase of banned.split(',').map(s => s.trim()).filter(Boolean)) {
     for (const field of ['goal', 'constraints', 'done_when'] as const) {
-      if ((input[field] ?? '').toLowerCase().includes(phrase.toLowerCase())) return `${field} 含禁用词：${phrase}`
+      const text = (input[field] ?? '').toLowerCase()
+      let index = text.indexOf(phrase.toLowerCase())
+      while (index !== -1) {
+        if (!/(?:不|没|无|别|勿|禁止|\b(?:no|not|don't|without|avoid|skip)\b).{0,5}$/i.test(text.slice(0, index))) return `${field} 含禁用词：${phrase}`
+        index = text.indexOf(phrase.toLowerCase(), index + phrase.length)
+      }
     }
   }
 }
@@ -124,7 +149,8 @@ export function argv(root: string, input: Input, cwd: string): string[] {
   const args = [`${root}/bin/workhorse`, '--detach']
   if (input.resume) {
     args.push('-r', input.resume)
-    if (input.to_code) args.push('--code')
+    if (input.mode) args.push(`--${input.mode}`)
+    else if (input.to_code) args.push('--code')
   } else {
     args.push(...(input.worktree ? ['-w', input.worktree] : ['-C', input.dir || cwd]))
     args.push(`--${input.mode ?? 'code'}`)

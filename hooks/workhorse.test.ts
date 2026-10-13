@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { argv, brief } from './lib'
+import { argv, brief, lint, panelLines } from './lib'
+import type { PanelTask } from './lib'
 
 test('hides codex-rescue and passes other agents through', async ($, on) => {
   const offered: string[] = []
@@ -35,7 +36,7 @@ test('running band refreshes elapsed seconds without stop or logs buttons', asyn
   on('process.run', ($, e) => {
     calls.push([...e.argv])
     return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify([
-      { name: 'patch', path: '/jobs/patch', state: 'running', mode: 'code', started: 0, elapsed_min: 0, cmds: 4, tests: 1, idle_min: 2, activity: 'Editing parser', files: 2, step: 1, steps: 2 },
+      { name: 'patch', base: 'patch', round: 1, busy: '', busy_min: 0, path: '/jobs/patch', state: 'running', mode: 'code', started: 0, elapsed_min: 0, cmds: 4, tests: 1, idle_min: 2, activity: 'Editing parser', files: 2, step: 1, steps: 2 },
     ]) } }
   })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
@@ -63,7 +64,7 @@ test('panel follows events live and disappears once every job is done', async ($
   let activity = 'Editing parser'
   let done = false
   on('process.run', ($, e) => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify(
-    ['one', 'two'].filter(name => e.argv.includes(name)).map(name => ({ name, path: `/jobs/${name}`, state: done || name === 'two' ? 'done' : 'running', mode: 'code', started: 0, cmds: 4, tests: 1, idle_min: 0, activity, files: 2 })),
+    ['one', 'two'].filter(name => e.argv.includes(name)).map(name => ({ name, base: name, round: 1, busy: '', busy_min: 0, exit: 0, path: `/jobs/${name}`, state: done || name === 'two' ? 'done' : 'running', mode: 'code', started: 0, cmds: 4, tests: 1, idle_min: 0, activity, files: 2 })),
   ) } }))
   on('fs.read', () => ({ value: 'Fixed parser' }))
   on('prompt.submit', ($, e) => ({ text: e.text }))
@@ -93,7 +94,7 @@ test('a session sees only its own jobs in the band', async ($, on) => {
   on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: 1, isLink: false } }))
   on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: '' }))
   store['job:/jobs/mine'] = { name: 'mine', session: 'session-1', goal: 'fix parser', doneWhen: 'unit test', warnedStall: false, warnedTests: false }
-  on('process.run', () => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify([{ name: 'mine', path: '/jobs/mine', state: 'running', mode: 'code', started: 0, cmds: 1, tests: 0, idle_min: 0, activity: 'x', files: 0 }]) } }))
+  on('process.run', () => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify([{ name: 'mine', base: 'mine', round: 1, busy: '', busy_min: 0, path: '/jobs/mine', state: 'running', mode: 'code', started: 0, cmds: 1, tests: 0, idle_min: 0, activity: 'x', files: 0 }]) } }))
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
   await clock.advance(30000)
   const props = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} }
@@ -125,7 +126,14 @@ test('lint refuses absent completion criteria and banned phrases in instruction 
   for (const field of ['goal', 'constraints', 'done_when']) {
     const banned = await $.tool.call({ tool: 'mcp__workhorse__run', goal: 'fix', context: '', done_when: 'unit test', [field]: 'BASELINE' })
     expect(banned.deny).toContain(field)
+    for (const negation of ['不', '没', '无', '别', '勿', '禁止', 'no', 'not', "don't", 'without', 'avoid', 'skip']) {
+      expect(lint({ goal: 'fix', context: '', done_when: 'unit test', [field]: `${negation} BASELINE` }, 'baseline')).toBeUndefined()
+    }
   }
+  expect(lint({ goal: '不12345baseline', context: '', done_when: 'unit test' }, 'baseline')).toBeUndefined()
+  expect(lint({ goal: '不123456baseline', context: '', done_when: 'unit test' }, 'baseline')).toContain('goal')
+  expect(lint({ goal: 'no baseline; baseline', context: '', done_when: 'unit test' }, 'baseline')).toContain('goal')
+  expect(lint({ goal: 'notable baseline', context: '', done_when: 'unit test' }, 'baseline')).toContain('goal')
 })
 
 test('launch writes argv, stdin and job; completion delivers report and acceptance command', async ($, on) => {
@@ -153,6 +161,9 @@ test('launch writes argv, stdin and job; completion delivers report and acceptan
   })
   expect(store).toEqual({ 'job:/jobs/patch': { name: 'patch', session: 'session-1', goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false } })
   expect(argv('/plugin', { ...input, resume: 'review', to_code: true }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-r', 'review', '--code', '-e', 'high', '-m', 'codex'])
+  for (const mode of ['code', 'review', 'ops'] as const) {
+    expect(argv('/plugin', { goal: 'fix', context: '', done_when: 'unit test', resume: 'job', mode, to_code: true }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-r', 'job', `--${mode}`])
+  }
   expect(argv('/plugin', { ...input, worktree: 'branch', mode: 'review' }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-w', 'branch', '--review', '-n', 'patch', '-e', 'high', '-m', 'codex'])
   await clock.advance(30000)
   expect(calls[1]).toEqual({ argv: [expect.stringMatching(/\/bin\/workhorse$/), '-s', 'patch'], init: { env: { WORKHORSE_ALLOW_OPS: '1' } } })
@@ -170,6 +181,8 @@ test('resuming an ops job asks first unless it becomes a code job', async ($, on
   const ask = { decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' }
   expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { resume: 'deploy' } })).toEqual(ask)
   expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { resume: 'deploy', to_code: true } })).toEqual({ decision: 'allow' })
+  expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { resume: 'deploy', mode: 'review' } })).toEqual({ decision: 'allow' })
+  expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { resume: 'patch', mode: 'ops', to_code: true } })).toEqual(ask)
   expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { resume: 'patch' } })).toEqual({ decision: 'allow' })
 })
 
@@ -177,13 +190,18 @@ test('stall and excess-test warnings each notify only once', async ($, on) => {
   const { clock } = setup(on)
   const messages: string[] = []
   const toasts: string[] = []
+  let busy = 'sleep 600'
   on('process.run', ($, e) => ({ value: { exitCode: 0, stderr: '', stdout: e.argv[1] === '--detach'
     ? 'started slow /jobs/slow\n'
-    : JSON.stringify([{ name: 'slow', path: '/jobs/slow', state: 'running', elapsed_min: 12, idle_min: 10, tests: 3 }]) } }))
+    : JSON.stringify([{ name: 'slow', path: '/jobs/slow', state: 'running', elapsed_min: 12, idle_min: 10, busy, busy_min: 10, tests: busy ? 0 : 3 }]) } }))
   on('prompt.submit', ($, e) => { messages.push(e.text); return { text: e.text } })
   on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
   await $.tool.call({ tool: 'mcp__workhorse__run', goal: 'fix', context: '', done_when: 'unit test' })
+  await clock.advance(30000)
+  expect(messages).toHaveLength(0)
+  expect(toasts).toHaveLength(0)
+  busy = ''
   await clock.advance(60000)
   expect(messages).toHaveLength(2)
   expect(toasts).toEqual(messages)
@@ -224,7 +242,7 @@ test('two polls sharing a store submit a done review job only once', async ($, o
   store['job:/jobs/review.2'] = { name: 'review.2', session: 'session-1', goal: 'review', doneWhen: '给出结论和证据', warnedStall: false, warnedTests: false }
   store['job:/jobs/other'] = { name: 'other', session: 'session-2', goal: 'fix', doneWhen: 'unit test', warnedStall: false, warnedTests: false }
   on('process.run', () => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify([
-    { name: 'review.2', path: '/jobs/review.2', state: 'done', mode: 'review' },
+    { name: 'review.2', base: 'review', path: '/jobs/review.2', state: 'done', mode: 'review' },
   ]) } }))
   on('fs.read', () => ({ value: 'Review evidence' }))
   on('prompt.submit', ($, e) => {
@@ -236,7 +254,50 @@ test('two polls sharing a store submit a done review job only once', async ($, o
   await clock.advance(30000)
   await clock.advance(30000)
   expect(messages).toHaveLength(1)
-  expect(messages[0]).toContain('核对结论和证据；要修复就用 resume + to_code 交回')
+  expect(messages[0]).toContain('核对结论和证据；要修复就用 resume review + to_code 交回')
   expect(messages[0]).not.toContain('自己运行')
   expect(Object.keys(store)).toEqual(['job:/jobs/other'])
+})
+
+test('panel shows failed exits, family rounds and busy commands', () => {
+  const task: PanelTask = { name: 'patch.2', base: 'patch', round: 2, busy: 'sleep 600', busy_min: 10, path: '/jobs/patch.2', state: 'running', mode: 'code', exit: null, started: 0, elapsed_min: 10, idle_min: 10, cmds: 4, activity: 'Editing parser', files: 2, tests: 0, tokens: 0, report: '', goal: 'fix' }
+  const lines = panelLines([
+    task,
+    { ...task, name: 'failed', base: 'failed', round: 1, state: 'done', exit: 1, busy: '' },
+    { ...task, name: 'ok', base: 'ok', round: 1, state: 'done', exit: 0, busy: '' },
+    { ...task, name: 'dead', base: 'dead', round: 1, state: 'dead', busy: '' },
+  ], 600000)
+  expect(lines[1]![0]!.children).toBe('4 agents · 1 running · 1 done · 2 failed')
+  expect(lines[2]![2]!.children).toContain('patch #2')
+  expect(lines[3]![0]!.children).toContain('running 10m: sleep 600')
+  expect(lines[4]![1]).toEqual({ children: '✗', color: 'error' })
+  expect(lines[4]![2]!.children).not.toContain('#1')
+  expect(lines[4]![3]).toEqual({ children: 'failed ', color: 'error' })
+  expect(lines[5]![0]!.children).toContain('Editing parser · 4 cmds · 2 files')
+})
+
+test('kill without a name selects only running jobs owned by this session', async ($, on) => {
+  const { store } = setup(on)
+  const calls: string[][] = []
+  let running = ['one', 'two']
+  for (const name of ['one', 'two', 'done', 'other']) {
+    store[`job:/jobs/${name}`] = { name, session: name === 'other' ? 'session-2' : 'session-1' }
+  }
+  on('process.run', ($, e) => {
+    calls.push([...e.argv])
+    return { value: { exitCode: 0, stderr: '', stdout: e.argv[1] === '-k' ? `killed ${e.argv[2]}` : JSON.stringify(e.argv.slice(2).map(name => ({ name, state: running.includes(name) ? 'running' : 'done' }))) } }
+  })
+  const multiple = await $.command.run({ command: 'workhorse-kill', args: '' })
+  expect(multiple.text).toContain('one\ntwo')
+  expect(calls).toEqual([[expect.stringMatching(/\/bin\/workhorse$/), '-s', 'one', 'two', 'done']])
+  running = ['two']
+  expect((await $.command.run({ command: 'workhorse-kill', args: ' ' })).text).toBe('killed two')
+  expect(calls[2]).toEqual([expect.stringMatching(/\/bin\/workhorse$/), '-k', 'two'])
+  running = []
+  expect((await $.command.run({ command: 'workhorse-kill', args: '' })).text).toContain('没有运行中')
+  for (const name of ['one', 'two', 'done']) delete store[`job:/jobs/${name}`]
+  const count = calls.length
+  expect((await $.command.run({ command: 'workhorse-kill', args: '' })).text).toContain('没有运行中')
+  expect(calls).toHaveLength(count)
+  expect((await $.command.run({ command: 'workhorse-kill', args: 'other' })).text).toBe('killed other')
 })
