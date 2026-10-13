@@ -33,6 +33,28 @@ async function openPane($: EngineInterface, options: PluginOptions) {
 }
 
 let ticking: { cancel: () => void } | undefined
+let polling = false
+let pollAgain = false
+
+async function pollOnce($: EngineInterface, options: PluginOptions) {
+  if (polling) {
+    pollAgain = true
+    return
+  }
+  polling = true
+  try {
+    do {
+      pollAgain = false
+      await poll($, options)
+    } while (pollAgain)
+  } catch (error) {
+    ticking?.cancel()
+    ticking = undefined
+    throw error
+  } finally {
+    polling = false
+  }
+}
 
 async function poll($: EngineInterface, options: PluginOptions) {
   const session = await $.session.id()
@@ -54,7 +76,15 @@ async function poll($: EngineInterface, options: PluginOptions) {
   statuses = polled
   $.ui.invalidate('ui.render')
   if (polled.some(status => status.state === 'running')) {
-    ticking ??= $.clock.every(1000, () => { $.ui.invalidate('ui.render') })
+    ticking ??= $.clock.every(1000, async () => {
+      $.ui.invalidate('ui.render')
+      for (const status of statuses) {
+        if (status.state === 'running' && await $.fs.exists(`${status.path}/report.txt`)) {
+          void pollOnce($, options)
+          return
+        }
+      }
+    })
   } else {
     ticking?.cancel()
     ticking = undefined
@@ -120,16 +150,7 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({ name: 'workhorse-jobs', description: 'Open and list Codex jobs', immediate: true })
     await $.command.register({ name: 'workhorse-kill', description: 'Kill a Codex job', argumentHint: '<name>', immediate: true })
-    let polling = false
-    $.clock.every(30000, async () => {
-      if (polling) return
-      polling = true
-      try {
-        await poll($, options)
-      } finally {
-        polling = false
-      }
-    })
+    $.clock.every(30000, () => pollOnce($, options))
     return next(e)
   })
 
@@ -190,7 +211,7 @@ export const register: Register = (on, options) => {
     if (result.exitCode !== 0) return { result: result.stderr }
     const job = started(result.stdout)
     await $.store.set(`job:${job.path}`, { name: job.name, session: await $.session.id(), goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false })
-    void poll($, options)
+    void pollOnce($, options)
     return { result: `started ${job.name}; 报告会以 workhorse 消息送达，不要轮询。` }
   })
 
