@@ -58,8 +58,8 @@ case "${1:-}" in
         ([$lines[] | capture("^[-*>#\\s]*(步骤|Step)\\s*(?<step>[0-9]+)\\s*/\\s*(?<steps>[0-9]+)") | {step: (.step | tonumber), steps: (.steps | tonumber)}] | last // {step: 0, steps: $steps}) as $progress |
         {name: $name, path: $path, dir: $dir, state: $state, mode: $mode, model: $model, effort: $effort,
          activity: ($items | last | if .type == "file_change" then "Editing " + (.changes[0].path | split("/") | last)
-                    elif .type == "command_execution" then (.command | if startswith("/bin/zsh -lc ") then ltrimstr("/bin/zsh -lc ") | sub("^[\u0027\"]"; "") | sub("[\u0027\"]$"; "") else . end)
-                    elif .type == "agent_message" then .text else "" end | split("\n")[0] | .[:60]),
+                    elif .type == "command_execution" then (.command // "" | if startswith("/bin/zsh -lc ") then ltrimstr("/bin/zsh -lc ") | sub("^[\u0027\"]"; "") | sub("[\u0027\"]$"; "") else . end)
+                    elif .type == "agent_message" then (.text // "") else "" end | (split("\n")[0] // "") | .[:60]),
          files: ([.[] | select(.type == "item.completed" and .item.type == "file_change") | .item.changes[].path] | unique | length),
          step: $progress.step, steps: $progress.steps,
          exit: (if $state == "done" then ($report | capture(" exit=(?<code>-?[0-9]+) ").code | tonumber) else null end),
@@ -68,7 +68,7 @@ case "${1:-}" in
          tests: ([$commands[] | select(.item.command | test($tests))] | length),
          tokens: (map(select(.type == "turn.completed") | .usage.input_tokens + .usage.output_tokens) | add // 0),
          last_cmds: ([.[] | select(.type == "item.started" and .item.type == "command_execution") | .item.command] | .[-5:]),
-         report: (if $state == "done" then $report else null end)}' "$log"
+         report: (if $state == "done" then $report else null end)}' < <(jq -c -R 'fromjson? // empty' "$log")
     done | jq -s '.'
     exit 0 ;;
   -l)
