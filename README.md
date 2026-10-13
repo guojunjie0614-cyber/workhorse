@@ -5,11 +5,12 @@ A Claude Code mod that hands coding, review and ops work to Codex the way Claude
 ## What it adds
 
 - **`mcp__workhorse__run` tool.** The brief is structured (`goal`, `context` and `done_when` required, `constraints` optional), plus `mode` (`code`, `review`, `ops`), `dir` or `worktree`, `name`, `resume` and `to_code`, `effort` (`low`, `medium`, `high`), `model`. The call returns at once.
-- **Brief lint.** A brief without `done_when`, or one whose goal, constraints or acceptance asks for baselines or full suites, is refused before Codex starts.
+- **Brief lint.** A brief without `done_when`, or one whose goal, constraints or acceptance asks for baselines or full suites, is refused before Codex starts; a negated phrase ("不跑全量测试", "no baseline") is allowed.
 - **Permissions.** `code` and `review` jobs run without a prompt; `ops` jobs, which run Codex with full access, ask first, and so does a resume of an ops job unless `to_code` or another `mode` is given. `allow_ops: false` turns them off.
-- **Watchdog.** Every 30 s the mod reads job status (and once right after a launch). A finished job's report is sent to Claude with a review reminder. A job with no output for `stall_minutes`, or more than `max_tests` test commands, is flagged once.
+- **Watchdog.** Every 30 s the mod reads job status (and once right after a launch). A finished job's report is sent to Claude with a review reminder. A job with no output for `stall_minutes` while no command is running, or more than `max_tests` test commands, is flagged once.
 - **Interface.** A Claude-style band above the prompt shows each job as a tree row with a spinning star, state, live elapsed time, and a second line with the latest Codex event, command count and changed-file count, re-read as soon as the job writes an event; finished jobs stay marked ✓ for up to 3 minutes while others run, and the band disappears once no job is running; `/workhorse-jobs` opens a pane with recent jobs, the selected job's last commands or report, and returns the `workhorse -l` text even without a UI; the tool's transcript row shows name, mode, effort and goal.
-- **Commands that run mid-turn.** `/workhorse-jobs` and `/workhorse-kill <name>`.
+- **Commands that run mid-turn.** `/workhorse-jobs` and `/workhorse-kill [name]`; without a name, kill stops this session's only running job or lists them.
+- **Job families.** A resume of `fix` or of any of its rounds becomes `fix.2`, `fix.3`, …; the band shows `fix #3`, and `-s`/`-t`/`-k` take the base name for the latest round. The report's first line splits tokens into new (`tokens=`) and `cached=`.
 - **No competing delegate.** With `hide_codex_rescue` (default on), the official Codex plugin's `codex:codex-rescue` subagent is not offered, so Claude doesn't pick between two delegation paths.
 - **`workhorse` CLI.** `bin/workhorse` is the engine and works on its own: `workhorse -C dir`, `--review`, `--ops`, `-w name`, `-r [name] [--code]`, `-l`, `-t`, `-s` (JSON status, including `activity`, the latest event in one line, and `files`, the number of changed files), `-k`, `--clean`, `--detach`. The bundled skill teaches Claude both paths.
 
