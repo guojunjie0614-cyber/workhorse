@@ -1,8 +1,8 @@
 # workhorse
 
-> A Claude Code mod that hands coding, review and ops work to Codex as background subagents. Claude writes a four-part brief, Codex does the work in the background, and the report comes back into the conversation for Claude to verify. User-facing text and Codex rules are in Chinese.
+> A Claude Code mod that hands coding, review and ops work to Codex as background subagents.
 
-让 Claude Code 像派子代理一样把活交给 Codex：Claude 写一份四段式 brief，Codex 在后台干活，报告自动回到对话里，由 Claude 审 diff、跑验收。Claude 负责想清楚和把关，Codex 负责动手。
+`workhorse` 是一个 Claude Code 插件，用于将编码实现、代码审查和运维操作以子代理方式委托给后台的 Codex 处理。Claude 负责撰写四段式 brief 并把关 diff 与验收，Codex 在后台异步执行，任务完成后将报告送回会话，避免轮询与等待。
 
 ```
 ✻ Working…
@@ -13,117 +13,143 @@
      nl -ba calc.py · 2 cmds · 0 files
 ```
 
-## 它做了什么
+# 仓库内容
 
-- **一个工具派活。** `mcp__workhorse__run` 调用后立即返回，Codex 在后台运行；Claude 不用轮询，完成后报告以消息形式送回对话，附带下一步提醒（code 任务提醒运行验收命令，review 任务提醒核对证据）。
-- **实时任务面板。** 提示框上方用 Claude 风格的树状面板显示本会话的每个任务：英文任务名、完整的中文说明、状态、每秒刷新的耗时；第二行实时显示 Codex 正在执行的命令和累计命令数、改动文件数。全部结束后面板自动消失。
-- **brief 先过检查。** 缺 `done_when`、缺中文 `title`、任务名不是英文短横线命名，或者 brief 里要求 baseline、全量测试、前后对比，都会在 Codex 启动前被拒绝；"不跑全量测试"这类否定说法不受影响。
-- **三种模式，权限分级。** `code` 只能写目标目录，`review` 只读，`ops` 可以访问仓库外和远程机器。`ops` 任务（以及续做 ops 任务）每次都会先征求你的同意。
-- **看门狗只提醒、不杀进程。** 长时间无输出、单条命令跑太久、同一命令原地打转、测试跑太多、同一任务累计 token 过多，各提醒一次。
-- **同一线程续做。** 用 `resume` 在原 Codex 线程上继续，不用重新读代码；review 的诊断可以用 `to_code` 直接转成修复。轮次自动命名为 `fix.2`、`fix.3`，面板显示为 `fix #3`。
-- **并行用 worktree 隔离。** `worktree: <name>` 从当前 HEAD 建独立工作树和分支，多个任务改不同文件时互不干扰；合并后用 `workhorse --clean` 清理，未合并的分支会被拒绝删除。
-- **报告精简可核对。** 第一行是退出码、模式、模型、耗时、新增与缓存 token、命令数、测试次数；接着是这次任务自己的 diff 统计（即使工作树原本就有未提交改动），最后是 Codex 不超过 10 行的总结。
-- **省 token 的规则块。** 每个首轮任务都附带按 OpenAI Codex 提示指南写的四段规则：只做要求的事、只跑指定的验证一次、不轮询、简短报告。续做同一模式时只补一句"前面的规则仍然有效"。
+- `hooks/register.ts`：注册 `mcp__workhorse__run` 工具、权限拦截、`/workhorse-kill` 命令与实时状态面板，按会话隔离状态。
+- `hooks/lib.ts`：负责 brief 拼装、前置校验（lint）、参数解析、终端排版与中文文案。
+- `bin/workhorse`：独立的命令行执行引擎，负责环境隔离、规则块附加、Codex 进程管理、事件记录、生成报告与 Git worktree 维护。
+- `prompts/blocks.md`：附加至 Codex 任务的四段精简规则（`action_safety`、`verification_loop`、`default_follow_through_policy`、`compact_output_contract`）。
+- `skills/workhorse/SKILL.md`：指导 Claude 何时派活、如何书写 brief 以及如何审查结果的 Skill 定义。
 
-## 安装
+## 免责声明
 
-需要：
+**本插件会在后台调用 Codex 执行终端命令与文件改动。** 虽然具备权限分级与看门狗提醒机制，但在将代码合并到主分支前，仍应始终核对 diff 并自行运行验收命令。请在适合自身环境与风险要求的场景下使用。
 
-- Claude Code v2.1.287 或更新（支持 mod；在 v2.1.296 上测试）
-- Codex CLI，支持 `codex exec --json` 且已登录（在 0.162.1 上测试）
+# 在 Claude Code 中试用
+
+依赖环境：
+- Claude Code v2.1.287 或更新版本（已在 v2.1.296 测试）
+- Codex CLI，已登录且支持 `codex exec --json`（已在 0.162.1 测试）
 - `bash`、`git`、`jq`、`perl`；macOS 或 Linux
+
+在 Claude Code 提示框中执行以下命令添加市场并安装：
+
+```
+/plugin marketplace add guojunjie0614-cyber/workhorse
+/plugin install workhorse@workhorse
+```
+
+也可以在系统终端中运行等价命令：
 
 ```bash
 claude plugin marketplace add guojunjie0614-cyber/workhorse
 claude plugin install workhorse@workhorse
 ```
 
-装好后在会话里执行 `/reload-plugins`，或新开一个会话（新开会话会让工具参数定义完整更新）。
+安装后在会话中执行 `/reload-plugins`，或重启会话以加载更新。
 
-想在终端里直接用引擎，克隆仓库后把它链接到 `PATH`：
+### 自然语言使用示例
 
-```bash
-git clone https://github.com/guojunjie0614-cyber/workhorse.git ~/workhorse
-ln -s ~/workhorse/bin/workhorse ~/.local/bin/workhorse
+安装完成后，在会话中直接向 Claude 提出修改需求：
+
+> 修复 parser.py 中遇到 None 时的解析异常，验收命令是 pytest tests/test_parser.py。
+
+Claude 会自动提取上下文并拼装 brief，通过后台子代理指派给 Codex 执行。
+
+### 最小调用示例
+
+插件通过 `mcp__workhorse__run` 工具派发任务，最小调用如下：
+
+```json
+{
+  "name": "fix-parser",
+  "title": "修复解析器空值",
+  "goal": "修复 parser.py 中遇到 None 时的解析异常",
+  "context": "parser.py parse() 函数在输入为空时抛出 AttributeError",
+  "done_when": "pytest tests/test_parser.py"
+}
 ```
 
-## 怎么用
+该工具调用后立即返回，Codex 在后台运行；完成后报告会自动送回对话，提醒 Claude 执行指定的验收命令。
 
-装好后正常跟 Claude 说要做什么即可，插件自带的 skill 会教 Claude 何时派活、怎么写 brief、怎么审结果。一次调用长这样：
+# 任务模式与调用字段
+
+### 三种模式
+
+- `code`（默认）：仅允许写入目标目录，适合单点代码实现与 bug 修复。
+- `review`：只读模式，用于定位根因和排查缺陷，不修改任何文件。
+- `ops`：运维模式，允许访问仓库外路径与远程机器；启动及续做 ops 任务前会向用户发起确认。
+
+### 调用字段说明
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `name` | 新任务必填 | 英文短横线命名，如 `fix-parser`；续做时可省略 |
-| `title` | 是 | 6–12 个中文字，面板完整显示，如"修复解析器空值" |
-| `goal` | 是 | 这一个改动是什么 |
-| `context` | 是 | 文件、函数、错误证据、需要的路径 |
-| `constraints` | 否 | 只写这个任务特有的限制 |
-| `done_when` | 是 | 一条验收命令 |
+| `name` | 新任务必填 | 英文短横线命名（如 `fix-parser`，匹配 `^[a-z][a-z0-9-]*$`）；续做时可省略 |
+| `title` | 是 | 6–12 个中文字（至多 24 列宽），面板完整显示，如“修复解析器空值” |
+| `goal` | 是 | 本次具体的单一改动目标 |
+| `context` | 是 | 关联的文件、函数、错误证据及路径 |
+| `constraints` | 否 | 仅属于本任务特有的限制 |
+| `done_when` | 是 | 一条具体的单项验收命令 |
 | `mode` | 否 | `code`（默认）、`review`、`ops` |
-| `dir` / `worktree` | 否 | 工作目录；或新建 worktree 并行 |
-| `resume`、`to_code` | 否 | 在原线程续做；把 review 结论转成修复 |
-| `effort`、`model` | 否 | 覆盖默认推理强度和模型 |
+| `dir` / `worktree` | 否 | 工作目录；或指定 worktree 名称从 HEAD 建立分支并行 |
+| `resume` / `to_code` | 否 | 在原线程续做；将 review 结论转为修复代码 |
+| `effort` / `model` | 否 | 覆盖默认的推理强度和模型 |
 
-推荐的工作方式：
+# 看门狗提醒
 
-1. **一个任务只做一个改动。** 不相关的需求拆成多个任务。
-2. **根因不明先 review。** 先 `mode: review` 诊断，再 `resume` + `to_code` 修复。
-3. **brief 里不写门禁。** baseline、全量测试、基准对比由 Claude 在合并后统一跑一次。
-4. **先收紧 brief，再提高强度。** 好的 brief 比更高的 effort 更省更准。
-5. **并行 2–3 个任务，按文件分开。** 先提交，再各自开 worktree。
-6. **不验收不接受。** Claude 对照 brief 读 diff，自己跑验收命令，有问题用 `resume` 交回。
+看门狗负责被动监控任务状态，只发提醒、不杀进程，每类提醒对单个任务仅触发一次：
 
-需要手动停止任务时，在会话里输入 `/workhorse-kill [name]`；不带名字时会停掉本会话唯一在跑的任务，有多个则列出来让你指定。
-
-## 看门狗提醒
-
-| 情况 | 触发条件（设置项） | 默认 |
+| 情况 | 触发条件（设置项） | 默认阈值 |
 |---|---|---|
-| 无输出 | 没有命令在跑，且这么多分钟没有新事件（`stall_minutes`） | 10 |
-| 命令跑太久 | 单条命令运行超过这么多分钟（`command_minutes`） | 20 |
-| 原地打转 | 同一命令、同一退出码连续出现这么多次，中间没改文件（`repeat_limit`） | 3 |
-| 测试跑太多 | 测试类命令超过这么多次（`max_tests`） | 2 |
-| token 过多 | 同一任务所有轮次累计 token 达到这个数（`family_tokens_warn`） | 1000000 |
+| 无输出 | 无命令运行且无新事件间隔超过阈值（`stall_minutes`） | 10 分钟 |
+| 命令跑太久 | 单条命令持续运行超过阈值（`command_minutes`） | 20 分钟 |
+| 原地打转 | 相同命令与退出码连续出现且未改动文件（`repeat_limit`） | 3 次 |
+| 测试跑太多 | 测试类命令执行次数达到上限（`max_tests`） | 2 次 |
+| token 过多 | 单个任务家族各轮次累计 token 达到阈值（`family_tokens_warn`） | 1000000 |
 
-每类提醒对同一任务只发一次，会同时弹出提示并告诉 Claude；被 `-k` 停掉的任务在面板上显示为灰色 `cancelled`，不计入失败。
+需要中断任务时，可在 Claude Code 中输入 `/workhorse-kill [name]`，或在终端执行 `workhorse -k [name]`。被终止的任务在面板上标记为 `cancelled`。
 
-## 命令行引擎
+# 命令行引擎
 
-`bin/workhorse` 是独立可用的引擎，插件通过它启动和查询任务：
+`bin/workhorse` 是独立可用的底层引擎，也可以软链接到 `PATH`（例如 `ln -s ~/workhorse/bin/workhorse ~/.local/bin/workhorse`）：
 
-| 命令 | 作用 |
+| 命令 | 说明 |
 |---|---|
-| `workhorse -C dir <<'EOF' … EOF` | 在 `dir` 里起一个 code 任务，brief 从 stdin 读入 |
-| `workhorse --review` / `--ops` | 只读诊断 / 运维任务 |
-| `workhorse -w name` | 新建 worktree `<repo>-name`（分支 `workhorse/name`）并在其中运行 |
-| `workhorse -r [name] [--code]` | 在同一 Codex 线程续做 |
-| `workhorse -l` | 最近的任务及其结果 |
-| `workhorse -t [name]` | 最近执行的命令、测试次数、距上次输出多久 |
-| `workhorse -s [name …]` | JSON 状态，供插件读取 |
-| `workhorse -k [name]` | 停止任务及其启动的所有命令 |
-| `workhorse --clean name` | 合并后删除 worktree 和分支 |
-| `workhorse -h` | 用法和当前设置 |
+| `workhorse -C dir <<'EOF' … EOF` | 在指定目录启动 code 任务，brief 从 stdin 读入 |
+| `workhorse --review` / `--ops` | 启动只读诊断或运维模式任务 |
+| `workhorse -w name` | 新建 worktree `<repo>-name`（分支 `workhorse/name`）并执行 |
+| `workhorse -r [name] [--code]` | 在原 Codex 线程上续做（`--code` 对应转为代码修复） |
+| `workhorse -l` | 查看近期任务列表及结果概况 |
+| `workhorse -t [name]` | 查看最近执行的命令、测试次数与最新输出间隔 |
+| `workhorse -s [name …]` | 输出任务状态 JSON，供外部或插件读取 |
+| `workhorse -k [name]` | 终止指定任务及其子进程 |
+| `workhorse --clean name` | 合并后清理对应 worktree 和分支（未合并或存在未提交改动时拒绝清理） |
+| `workhorse -h` | 显示命令行帮助与当前配置 |
 
-任务记录存放在 `~/.cache/workhorse/<name>/`（`prompt.md`、`events.jsonl`、`final.md`、`report.txt`、`session.txt` 等），超过 `keep_days` 天自动清理。
+任务记录保存在 `~/.cache/workhorse/<name>/`（包括 `prompt.md`、`events.jsonl`、`codex.log`、`final.md`、`report.txt`、`session.txt` 等），超出 `keep_days` 后自动清理。
 
-## 设置
+# 设置项
 
-在 `/plugin configure workhorse@workhorse` 里修改。字符串留空表示用引擎默认值。单独用命令行时，可以写成环境变量，或写进 `~/.config/workhorse/config`（每行 `WORKHORSE_XXX=值`）。
+可以在 `/plugin configure workhorse@workhorse` 中配置，或写入 `~/.config/workhorse/config`（格式为 `WORKHORSE_XXX=值`）及环境变量：
 
-| 设置 | 引擎变量 | 默认 |
-|---|---|---|
-| `model_code`、`model_review`、`model_ops` | `WORKHORSE_MODEL_*` | `gpt-6-astra`、`gpt-6-astra`、`gpt-6.1-sol` |
-| `effort_code`、`effort_review`、`effort_ops` | `WORKHORSE_EFFORT_*` | `medium`、`high`、`high` |
-| `fast_match` | `WORKHORSE_FAST_MATCH` | `*sol*`：匹配的模型走 Fast 档，默认 high 强度 |
-| `disable_mcp` | `WORKHORSE_DISABLE_MCP` | `node_repl` |
-| `allow_ops` | `WORKHORSE_ALLOW_OPS` | `true` |
-| `keep_days` | `WORKHORSE_KEEP_DAYS` | `14` |
-| `skip_skills` | `WORKHORSE_SKIP_SKILLS` | `karpathy-guidelines,code-review,diagnosing-bugs,tdd`：Codex 不必再读的通用流程技能；留空则去掉这条规则 |
-| `stall_minutes`、`command_minutes`、`repeat_limit`、`max_tests`、`family_tokens_warn` | | 见上方看门狗表 |
-| `banned_phrases` | | `baseline,全量测试,full test suite,前后对比,before/after` |
-| `hide_codex_rescue` | | `true`：装了官方 Codex 插件时，不让 Claude 再看到 `codex:codex-rescue`，避免两条派活路径相互竞争 |
+| 设置项 | 引擎环境变量 | 默认值 | 说明 |
+|---|---|---|---|
+| `model_code` / `model_review` / `model_ops` | `WORKHORSE_MODEL_*` | `gpt-6-astra` / `gpt-6-astra` / `gpt-6.1-sol` | 各模式默认模型 |
+| `effort_code` / `effort_review` / `effort_ops` | `WORKHORSE_EFFORT_*` | `medium` / `high` / `high` | 各模式推理强度 |
+| `fast_match` | `WORKHORSE_FAST_MATCH` | `*sol*` | 匹配的模型走 Fast 档，默认 high 强度 |
+| `disable_mcp` | `WORKHORSE_DISABLE_MCP` | `node_repl` | 禁用的 MCP 服务 |
+| `allow_ops` | `WORKHORSE_ALLOW_OPS` | `true` | 是否允许 ops 模式 |
+| `stall_minutes` | - | `10` | 无输出提醒阈值（分钟） |
+| `command_minutes` | - | `20` | 单命令超时提醒阈值（分钟） |
+| `repeat_limit` | - | `3` | 重复命令触发提醒次数 |
+| `max_tests` | - | `2` | 测试类命令执行上限提醒 |
+| `family_tokens_warn` | - | `1000000` | 累计 token 消耗提醒阈值 |
+| `keep_days` | `WORKHORSE_KEEP_DAYS` | `14` | 任务历史记录保留天数 |
+| `skip_skills` | `WORKHORSE_SKIP_SKILLS` | `karpathy-guidelines,code-review,diagnosing-bugs,tdd` | Codex 忽略的通用流程技能 |
+| `banned_phrases` | - | `baseline,全量测试,full test suite,前后对比,before/after` | brief 禁止包含的门禁词汇（逗号分隔） |
+| `hide_codex_rescue` | - | `true` | 安装官方 Codex 插件时隐藏 `codex:codex-rescue` |
 
-## 工作原理
+# 工作原理
 
 ```
 Claude ──mcp__workhorse__run──▶ hooks/register.ts ──lint / 权限──▶ bin/workhorse --detach
@@ -132,23 +158,22 @@ Claude ──mcp__workhorse__run──▶ hooks/register.ts ──lint / 权限�
                               面板 / 提醒 / 完成通知  ◀── events.jsonl ◀── codex exec --json
 ```
 
-- `hooks/register.ts` 注册工具、权限检查、`/workhorse-kill` 和面板，按会话隔离状态；每 30 秒轮询一次，任务写入新事件时立即刷新。
-- `hooks/lib.ts` 放 brief 拼装、lint、命令行参数、面板排版和全部中文文案。
-- `bin/workhorse` 负责建目录、拼规则块、启动 Codex、记录事件、生成报告、worktree 和清理。
-- `prompts/blocks.md` 是附加给 Codex 的四段规则。
-- `skills/workhorse/SKILL.md` 教 Claude 写 brief 和审查。
+- `hooks/register.ts`：注册工具接口与状态面板，维护会话级任务状态，每 30 秒轮询或随任务新事件即时刷新。
+- `hooks/lib.ts`：在任务派发前执行 brief lint 检查，若缺少 `done_when`、标题不合规或包含门禁词则直接拦截。
+- `bin/workhorse`：为 Codex 构建执行参数与规则块，通过 `codex exec --json` 启动子进程并输出事件流。
+- 完成通知确认送达至 Claude 会话后才删除任务标记；Codex 线程 ID 在启动时持久化记录，保证异常中断后仍可续做。
 
-完成通知确认送达后才删除任务记录；Codex 线程一开始就记下线程 ID，进程意外中断后也能续做。
+# 开发
 
-## 开发
+运行校验与测试：
 
 ```bash
 claude plugin validate . --strict
 claude plugin test
 ```
 
-测试在 `hooks/workhorse.test.ts`，使用 Claude Code 自带的 mod 测试工具（模拟 store、时钟和进程调用），不消耗 token。
+测试用例位于 `hooks/workhorse.test.ts`，使用 Claude Code 自带的 mod 测试机制模拟状态与进程调用，不消耗 token。
 
-## 许可证
+# 许可证
 
 [MIT](LICENSE)
