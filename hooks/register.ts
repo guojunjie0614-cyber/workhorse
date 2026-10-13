@@ -34,7 +34,7 @@ async function openPane($: EngineInterface, options: PluginOptions) {
 
 let ticking: { cancel: () => void } | undefined
 let polling = false
-const seenEvents = new Map<string, number>()
+const seenEvents = new Map<string, string>()
 let pollAgain = false
 
 async function pollOnce($: EngineInterface, options: PluginOptions) {
@@ -97,8 +97,9 @@ async function poll($: EngineInterface, options: PluginOptions) {
       for (const status of statuses) {
         if (status.state !== 'running') continue
         const stat = await $.fs.stat(`${status.path}/events.jsonl`).catch(() => undefined)
-        const changed = stat !== undefined && stat.mtimeMs !== seenEvents.get(status.name)
-        if (stat) seenEvents.set(status.name, stat.mtimeMs)
+        const mark = stat && `${stat.mtimeMs}:${stat.size}`
+        const changed = mark !== undefined && mark !== seenEvents.get(status.name)
+        if (mark) seenEvents.set(status.name, mark)
         if (changed || await $.fs.exists(`${status.path}/report.txt`)) {
           void pollOnce($, options)
           return
