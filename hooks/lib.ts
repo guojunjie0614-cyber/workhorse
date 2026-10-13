@@ -4,16 +4,15 @@ import type { PluginOptions } from 'claude-code'
 export const POLL_SECONDS = 30
 // Minutes to keep finished jobs visible while other jobs run.
 export const DONE_LINGER_MINUTES = 3
-// Maximum terminal columns for each job goal.
-export const GOAL_COLUMNS = 40
+// Maximum terminal columns for each job title.
+export const TITLE_COLUMNS = 24
+// New job names: English kebab-case.
+export const NAME_PATTERN = /^[a-z][a-z0-9-]*$/
 // Maximum report characters included in completion notices.
 export const REPORT_MAX_CHARS = 6000
 
 export const FRAME_MS = 250
 export const SPINNER_FRAMES = Array.from('·✢✳✶✻✽')
-export const MIN_GOAL_COLUMNS = 10
-export const TOOL_LINE_GOAL_CHARS = 80
-export const DEFAULT_TERMINAL_COLUMNS = 120
 export const MS_PER_SECOND = 1000
 export const SECONDS_PER_MINUTE = 60
 export const MINUTES_PER_HOUR = 60
@@ -55,6 +54,10 @@ export const MESSAGES = {
   noRunning: '本会话没有运行中的 workhorse 任务。',
   multipleRunning: (names: string[]) => `本会话有多个运行中的任务，请用 /workhorse-kill <name> 指名：\n${names.join('\n')}`,
   missingDoneWhen: 'done_when 必须填写明确的完成条件',
+  titleDescription: '用中文写 6–12 个字说明这个任务在做什么',
+  missingTitle: 'title 必须填写简短中文说明',
+  titleTooWide: `title 显示宽度不能超过 ${TITLE_COLUMNS} 列`,
+  invalidName: '新任务 name 必填，须以小写英文字母开头，仅含小写英文字母、数字和短横线',
   bannedPhrase: (field: string, phrase: string) => `${field} 含禁用词：${phrase}`,
   ...PANEL_TEXT,
   auto: '自动',
@@ -62,6 +65,7 @@ export const MESSAGES = {
 }
 
 export type Input = {
+  title: string
   goal: string
   context: string
   done_when: string
@@ -77,6 +81,7 @@ export type Input = {
 }
 
 export type Job = {
+  title?: string
   name: string
   session: string
   goal: string
@@ -110,26 +115,24 @@ export type Status = {
   family_tokens: number
 }
 
-export type PanelTask = Status & { goal: string; completedAt?: number }
+export type PanelTask = Status & { goal: string; title?: string; completedAt?: number }
 type Segment = { children: string; color?: 'claude' | 'success' | 'error' | 'inactive'; dimColor?: boolean }
 
-export function panelLines(tasks: PanelTask[], now: number, columns = DEFAULT_TERMINAL_COLUMNS): Segment[][] {
+export function panelLines(tasks: PanelTask[], now: number): Segment[][] {
   const visible = tasks.filter(task => task.state !== 'missing' && (task.completedAt === undefined || now - task.completedAt < DONE_LINGER_MINUTES * MS_PER_MINUTE))
   if (!visible.some(task => task.state === 'running')) return []
   const frame = Math.floor(now / FRAME_MS)
   const star = SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!
   const running = visible.filter(task => task.state === 'running').length
   const nameWidth = Math.max(...visible.map(task => width(taskName(task))))
-  const rows = visible.map((task, index) => taskLines(task, now, star, index === visible.length - 1, nameWidth))
-  const remainingColumns = Math.min(...rows.map(([line]) => columns - line!.reduce((sum, segment) => sum + width(segment.children), 0)))
-  const goalWidth = Math.max(MIN_GOAL_COLUMNS, Math.min(Math.max(...visible.map(task => width(headline(task.goal)))), GOAL_COLUMNS, remainingColumns))
+  const titleWidth = Math.min(TITLE_COLUMNS, Math.max(...visible.map(task => width(task.title ?? headline(task.goal)))))
   const done = visible.filter(task => !task.cancelled && task.state === 'done' && task.exit === 0).length
   const failed = visible.filter(task => !task.cancelled && (task.state === 'dead' || (task.state === 'done' && task.exit !== 0))).length
   const cancelled = visible.filter(task => task.cancelled).length
   return [
     [{ children: `${star} ${MESSAGES.working}`, color: 'claude' }],
     [{ children: MESSAGES.summary(visible.length, running, done, failed, cancelled), dimColor: true }],
-    ...visible.flatMap((task, index) => taskLines(task, now, star, index === visible.length - 1, nameWidth, fit(headline(task.goal), goalWidth))),
+    ...visible.flatMap((task, index) => taskLines(task, now, star, index === visible.length - 1, nameWidth, task.title === undefined ? fit(headline(task.goal), titleWidth) : pad(task.title, titleWidth))),
   ]
 }
 
@@ -145,7 +148,7 @@ function width(text: string): number {
   return Array.from(text).reduce((sum, char) => sum + charWidth(char), 0)
 }
 
-// The band shows a goal's first clause; the full goal stays in the brief and the report.
+// Older stored jobs have no title; use their goal's first clause.
 function headline(text: string): string {
   return oneLine(text).split(/\s*[：:（(。；;]/)[0]!.trim() || oneLine(text)
 }
@@ -192,12 +195,15 @@ function taskLines(status: PanelTask, now: number, star: string, last: boolean, 
 }
 
 export function toolLine(input: Input): string {
-  return `workhorse ▸ ${input.name || input.resume || MESSAGES.auto} · ${input.mode ?? 'code'} · ${input.effort ?? MESSAGES.defaultEffort} — ${Array.from(input.goal).slice(0, TOOL_LINE_GOAL_CHARS).join('').replace(/\s+/g, ' ')}`
+  return `workhorse ▸ ${input.name || input.resume || MESSAGES.auto} · ${input.mode ?? 'code'} · ${input.effort ?? MESSAGES.defaultEffort} — ${input.title}`
 }
 
 export function lint(input: Input, banned: string): string | undefined {
   const negation = new RegExp(`(?:${NEGATIONS.join('|')}).{0,${NEGATION_WINDOW}}$`, 'i')
   if (!input.done_when?.trim()) return MESSAGES.missingDoneWhen
+  if (!input.title?.trim()) return MESSAGES.missingTitle
+  if (width(input.title) > TITLE_COLUMNS) return MESSAGES.titleTooWide
+  if (!input.resume && (!input.name || !NAME_PATTERN.test(input.name))) return MESSAGES.invalidName
   for (const phrase of banned.split(',').map(s => s.trim()).filter(Boolean)) {
     for (const field of ['goal', 'constraints', 'done_when'] as const) {
       const text = (input[field] ?? '').toLowerCase()

@@ -9,6 +9,8 @@ Use `mcp__workhorse__run`. Fill `goal`, `context`, `done_when` (required) and `c
 
 Use the CLI below for inspecting and cleaning up jobs.
 
+Every tool call requires `title`: write 6–12 Chinese characters explaining what the job does, at most 24 terminal columns. The band and tool transcript show this title in full instead of the goal. New jobs also require an English kebab-case `name`, such as `fix-parser`, matching `^[a-z][a-z0-9-]*$`; `name` is optional when using `resume`.
+
 | Call | Effect |
 |---|---|
 | `workhorse --clean name` | after merging, remove that worktree and branch; refuses, leaving both in place, if the branch is not merged into the main checkout's HEAD or the worktree has uncommitted changes |

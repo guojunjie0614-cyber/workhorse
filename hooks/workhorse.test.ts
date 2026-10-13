@@ -1,7 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { argv, brief, DONE_LINGER_MINUTES, GOAL_COLUMNS, lint, MESSAGES, MS_PER_MINUTE, MS_PER_SECOND, panelLines, POLL_SECONDS, REPORT_MAX_CHARS } from './lib'
+import { argv, brief, DONE_LINGER_MINUTES, TITLE_COLUMNS, lint, MESSAGES, MS_PER_MINUTE, MS_PER_SECOND, panelLines, POLL_SECONDS, REPORT_MAX_CHARS } from './lib'
 import type { PanelTask } from './lib'
+
+const taskInput = { name: 'fix-parser', title: '修复输入解析逻辑' }
 
 test('hides codex-rescue and passes other agents through', async ($, on) => {
   const offered: string[] = []
@@ -31,7 +33,7 @@ function setup(on: On) {
 
 test('running band refreshes elapsed seconds without stop or logs buttons', async ($, on) => {
   const { clock, store } = setup(on)
-  store['job:/jobs/patch'] = { name: 'patch', session: 'session-1', goal: 'fix', doneWhen: 'unit test', warnedStall: false, warnedTests: false }
+  store['job:/jobs/patch'] = { name: 'patch', session: 'session-1', title: taskInput.title, goal: 'fix', doneWhen: 'unit test', warnedStall: false, warnedTests: false }
   const calls: string[][] = []
   on('process.run', ($, e) => {
     calls.push([...e.argv])
@@ -45,6 +47,7 @@ test('running band refreshes elapsed seconds without stop or logs buttons', asyn
     hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {},
   } })
   expect(await ui.find({ type: 'Text', text: '  30s' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ` patch  ${taskInput.title}  ` })).toBeDefined()
   await clock.advance(35000)
   expect(await ui.find({ type: 'Text', text: '  1m05s' })).toBeDefined()
   expect(await ui.find({ type: 'Button' })).toBeUndefined()
@@ -109,33 +112,48 @@ test('a session sees only its own jobs in the band', async ($, on) => {
   await other.unmount()
 })
 
-test('workhorse ToolUse draws the goal in a compact line', async ($, on) => {
+test('workhorse ToolUse draws the title in a compact line', async ($, on) => {
   setup(on)
   const ui = await $.ui.mount({ plugin: 'workhorse', component: 'ToolUse', surface: 'terminal', requestId: 'call-1', props: {
-    tool_use_id: 'call-1', tool: 'mcp__workhorse__run', input: { name: 'patch', goal: 'fix parser', mode: 'code', effort: 'high' },
+    tool_use_id: 'call-1', tool: 'mcp__workhorse__run', input: { ...taskInput, name: 'patch', goal: 'fix parser', mode: 'code', effort: 'high' },
     isRunning: true, isErrored: false, isInterrupted: false,
   } })
-  expect(await ui.find({ type: 'Text', text: 'workhorse ▸ patch · code · high — fix parser' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: `workhorse ▸ patch · code · high — ${taskInput.title}` })).toBeDefined()
   await ui.unmount()
 })
 
 test('lint refuses absent completion criteria and banned phrases in instruction fields', async ($, on) => {
   setup(on)
-  const missing = await $.tool.call({ tool: 'mcp__workhorse__run', goal: 'fix', context: '' })
+  const missing = await $.tool.call({ tool: 'mcp__workhorse__run', ...taskInput, goal: 'fix', context: '' })
   expect(missing.deny).toContain('done_when')
-  const empty = await $.tool.call({ tool: 'mcp__workhorse__run', goal: 'fix', context: '', done_when: '  ' })
+  const empty = await $.tool.call({ tool: 'mcp__workhorse__run', ...taskInput, goal: 'fix', context: '', done_when: '  ' })
   expect(empty.deny).toContain('done_when')
   for (const field of ['goal', 'constraints', 'done_when']) {
-    const banned = await $.tool.call({ tool: 'mcp__workhorse__run', goal: 'fix', context: '', done_when: 'unit test', [field]: 'BASELINE' })
+    const banned = await $.tool.call({ tool: 'mcp__workhorse__run', ...taskInput, goal: 'fix', context: '', done_when: 'unit test', [field]: 'BASELINE' })
     expect(banned.deny).toContain(field)
     for (const negation of ['不', '没', '无', '别', '勿', '禁止', 'no', 'not', "don't", 'without', 'avoid', 'skip']) {
-      expect(lint({ goal: 'fix', context: '', done_when: 'unit test', [field]: `${negation} BASELINE` }, 'baseline')).toBeUndefined()
+      expect(lint({ ...taskInput, goal: 'fix', context: '', done_when: 'unit test', [field]: `${negation} BASELINE` }, 'baseline')).toBeUndefined()
     }
   }
-  expect(lint({ goal: '不12345baseline', context: '', done_when: 'unit test' }, 'baseline')).toBeUndefined()
-  expect(lint({ goal: '不123456baseline', context: '', done_when: 'unit test' }, 'baseline')).toContain('goal')
-  expect(lint({ goal: 'no baseline; baseline', context: '', done_when: 'unit test' }, 'baseline')).toContain('goal')
-  expect(lint({ goal: 'notable baseline', context: '', done_when: 'unit test' }, 'baseline')).toContain('goal')
+  expect(lint({ ...taskInput, goal: '不12345baseline', context: '', done_when: 'unit test' }, 'baseline')).toBeUndefined()
+  expect(lint({ ...taskInput, goal: '不123456baseline', context: '', done_when: 'unit test' }, 'baseline')).toContain('goal')
+  expect(lint({ ...taskInput, goal: 'no baseline; baseline', context: '', done_when: 'unit test' }, 'baseline')).toContain('goal')
+  expect(lint({ ...taskInput, goal: 'notable baseline', context: '', done_when: 'unit test' }, 'baseline')).toContain('goal')
+})
+
+test('lint requires a short title and an English kebab name for new jobs', async ($, on) => {
+  setup(on)
+  const input = { ...taskInput, goal: 'fix', context: '', done_when: 'unit test' }
+  const withoutTitle = { name: input.name, goal: input.goal, context: input.context, done_when: input.done_when }
+  expect((await $.tool.call({ tool: 'mcp__workhorse__run', ...withoutTitle })).deny).toBe(MESSAGES.missingTitle)
+  for (const title of ['', '  ', '修'.repeat(TITLE_COLUMNS / 2 + 1)]) {
+    expect((await $.tool.call({ tool: 'mcp__workhorse__run', ...input, title })).deny).toBe(title.trim() ? MESSAGES.titleTooWide : MESSAGES.missingTitle)
+  }
+  for (const name of [undefined, '', '修复', 'Fix-parser']) {
+    expect((await $.tool.call({ tool: 'mcp__workhorse__run', ...input, name })).deny).toBe(MESSAGES.invalidName)
+  }
+  expect(lint({ ...input, title: '修'.repeat(TITLE_COLUMNS / 2) }, '')).toBeUndefined()
+  expect(lint({ ...input, name: undefined, resume: 'legacy.2' }, '')).toBeUndefined()
 })
 
 test('launch writes argv, stdin and job; completion delivers report and acceptance command', { options: { keep_days: 7, skip_skills: '' } }, async ($, on) => {
@@ -155,17 +173,17 @@ test('launch writes argv, stdin and job; completion delivers report and acceptan
   })
   on('prompt.submit', ($, e) => { messages.push(e.text); return { text: e.text } })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  const input = { goal: 'fix parser', context: 'baseline.ts rejects input', constraints: 'only parser', done_when: 'npm run test:parser', name: 'patch', effort: 'xhigh', model: 'codex' }
+  const input = { ...taskInput, goal: 'fix parser', context: 'baseline.ts rejects input', constraints: 'only parser', done_when: 'npm run test:parser', name: 'patch', effort: 'xhigh', model: 'codex' }
   const result = await $.tool.call({ tool: 'mcp__workhorse__run', ...input })
   expect(result.result).toContain('patch')
   expect(calls[0]).toEqual({
     argv: [expect.stringMatching(/\/bin\/workhorse$/), '--detach', '-C', '/repo', '--code', '-n', 'patch', '-e', 'xhigh', '-m', 'codex'],
     init: { cwd: '/repo', env: { WORKHORSE_ALLOW_OPS: '1', WORKHORSE_KEEP_DAYS: '7', WORKHORSE_SKIP_SKILLS: '' }, stdin: 'Goal: fix parser\nContext: baseline.ts rejects input\nConstraints: only parser\nDone when: npm run test:parser' },
   })
-  expect(store).toEqual({ 'job:/jobs/patch': { name: 'patch', session: 'session-1', goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false } })
+  expect(store).toEqual({ 'job:/jobs/patch': { name: 'patch', session: 'session-1', title: input.title, goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false } })
   expect(argv('/plugin', { ...input, resume: 'review', to_code: true }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-r', 'review', '--code', '-e', 'xhigh', '-m', 'codex'])
   for (const mode of ['code', 'review', 'ops'] as const) {
-    expect(argv('/plugin', { goal: 'fix', context: '', done_when: 'unit test', resume: 'job', mode, to_code: true }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-r', 'job', `--${mode}`])
+    expect(argv('/plugin', { ...taskInput, goal: 'fix', context: '', done_when: 'unit test', resume: 'job', mode, to_code: true }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-r', 'job', `--${mode}`])
   }
   expect(argv('/plugin', { ...input, worktree: 'branch', mode: 'review' }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-w', 'branch', '--review', '-n', 'patch', '-e', 'xhigh', '-m', 'codex'])
   await clock.advance(POLL_SECONDS * MS_PER_SECOND)
@@ -175,7 +193,7 @@ test('launch writes argv, stdin and job; completion delivers report and acceptan
   expect(messages[0]).not.toContain('完整报告末尾')
   expect(messages[0]).toContain(input.done_when)
   expect(store).toEqual({})
-  expect(brief({ goal: 'fix', context: 'baseline.ts', done_when: 'unit test' })).toBe('Goal: fix\nContext: baseline.ts\nDone when: unit test')
+  expect(brief({ ...taskInput, goal: 'fix', context: 'baseline.ts', done_when: 'unit test' })).toBe('Goal: fix\nContext: baseline.ts\nDone when: unit test')
   expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { mode: 'ops' } })).toEqual({ decision: 'ask', reason: 'ops 任务让 Codex 在仓库外以完整权限运行' })
 })
 
@@ -201,7 +219,7 @@ test('stall and excess-test warnings each notify only once', async ($, on) => {
   on('prompt.submit', ($, e) => { messages.push(e.text); return { text: e.text } })
   on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  await $.tool.call({ tool: 'mcp__workhorse__run', goal: 'fix', context: '', done_when: 'unit test' })
+  await $.tool.call({ tool: 'mcp__workhorse__run', ...taskInput, name: 'slow', goal: 'fix', context: '', done_when: 'unit test' })
   await clock.advance(POLL_SECONDS * MS_PER_SECOND)
   expect(messages).toHaveLength(0)
   expect(toasts).toHaveLength(0)
@@ -322,16 +340,17 @@ test('two polls sharing a store submit a done review job only once', async ($, o
 })
 
 test('panel shows failed exits, family rounds and busy commands', () => {
-  const task: PanelTask = { name: 'patch.2', base: 'patch', round: 2, busy: 'sleep 600', busy_min: 10, path: '/jobs/patch.2', state: 'running', mode: 'code', exit: null, started: 0, idle_min: 10, cmds: 4, activity: 'Editing parser', files: 2, tests: 0, cancelled: false, repeat: 0, repeat_cmd: '', family_tokens: 0, goal: 'x'.repeat(GOAL_COLUMNS + 1) }
+  const task: PanelTask = { name: 'patch.2', base: 'patch', round: 2, busy: 'sleep 600', busy_min: 10, path: '/jobs/patch.2', state: 'running', mode: 'code', exit: null, started: 0, idle_min: 10, cmds: 4, activity: 'Editing parser', files: 2, tests: 0, cancelled: false, repeat: 0, repeat_cmd: '', family_tokens: 0, title: '修复解析：保留全部输入值', goal: 'x'.repeat(TITLE_COLUMNS + 1) }
   const lines = panelLines([
     task,
     { ...task, name: 'failed', base: 'failed', round: 1, state: 'done', exit: 1, busy: '' },
     { ...task, name: 'ok', base: 'ok', round: 1, state: 'done', exit: 0, busy: '' },
-    { ...task, name: 'dead', base: 'dead', round: 1, state: 'dead', busy: '' },
+    { ...task, name: 'dead', base: 'dead', round: 1, state: 'dead', busy: '', title: undefined },
   ], 600000)
   expect(lines[1]![0]!.children).toBe('4 agents · 1 running · 1 done · 2 failed')
   expect(lines[2]![2]!.children).toContain('patch #2')
-  expect(lines[2]![2]!.children).toContain('x'.repeat(GOAL_COLUMNS - 1) + '…')
+  expect(lines[2]![2]!.children).toContain(task.title!)
+  expect(lines[8]![2]!.children).toContain('x'.repeat(TITLE_COLUMNS - 1) + '…')
   expect(lines[3]![0]!.children).toContain('running 10m: sleep 600')
   expect(lines[4]![1]).toEqual({ children: '✗', color: 'error' })
   expect(lines[4]![2]!.children).not.toContain('#1')

@@ -59,6 +59,7 @@ async function poll($: EngineInterface, options: PluginOptions, state: SessionSt
   const fresh = polled.filter(status => status.state !== 'missing').map(status => ({
     ...status,
     goal: owned.find(([, job]) => job.name === status.name)![1].goal,
+    title: owned.find(([, job]) => job.name === status.name)![1].title,
     completedAt: status.state === 'done' || status.state === 'dead'
       ? state.statuses.find(previous => previous.name === status.name)?.completedAt ?? now
       : undefined,
@@ -168,12 +169,13 @@ export const register: Register = (on, options) => {
       inputSchema: {
         type: 'object',
         properties: {
+          title: { type: 'string', description: MESSAGES.titleDescription },
           goal: { type: 'string' }, context: { type: 'string' }, done_when: { type: 'string' },
           constraints: { type: 'string' }, mode: { type: 'string', enum: ['code', 'review', 'ops'], default: 'code' },
           dir: { type: 'string' }, worktree: { type: 'string' }, name: { type: 'string' }, resume: { type: 'string' },
           to_code: { type: 'boolean' }, effort: { type: 'string', description: MESSAGES.effortDescription }, model: { type: 'string' },
         },
-        required: ['goal', 'context', 'done_when'],
+        required: ['title', 'goal', 'context', 'done_when'],
       },
     })
     await $.command.register({ name: 'workhorse-kill', description: MESSAGES.killDescription, argumentHint: MESSAGES.killArgumentHint, immediate: true })
@@ -183,7 +185,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const now = await $.clock.now()
-    const lines = panelLines(sessionState(await $.session.id()).statuses, now, e.props.bodyColumns)
+    const lines = panelLines(sessionState(await $.session.id()).statuses, now)
     if (!lines.length) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     return Box({ flexDirection: 'column', children: lines.map(line => Text({ wrap: 'truncate-end', children: line.map(segment => Text({ color: 'text', ...segment })) })) })
@@ -221,7 +223,7 @@ export const register: Register = (on, options) => {
     const result = await $.process.run(argv($.plugin.root, input, cwd), { cwd, env: environment(options), stdin: brief(input) })
     if (result.exitCode !== 0) return { result: result.stderr }
     const job = started(result.stdout)
-    await $.store.set(`job:${job.path}`, { name: job.name, session: await $.session.id(), goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false })
+    await $.store.set(`job:${job.path}`, { name: job.name, session: await $.session.id(), title: input.title, goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false })
     void pollOnce($, options)
     const lines = result.stdout.split('\n')
     const warnings = lines.slice(lines.findIndex(line => line.startsWith('started ')) + 1).filter(line => line.startsWith('warning:'))
