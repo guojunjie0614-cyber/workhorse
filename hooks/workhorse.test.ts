@@ -16,6 +16,8 @@ function setup(on: On) {
   const store: Record<string, unknown> = {}
   on('store.get', ($, e) => ({ value: store[e.key] }))
   on('store.set', ($, e) => { store[e.key] = e.value; return { value: undefined } })
+  on('store.keys', () => ({ value: Object.keys(store) }))
+  on('store.delete', ($, e) => { delete store[e.key]; return { value: undefined } })
   const clock = mock.clock(on)
   on('session.id', () => ({ value: 'session-1' }))
   on('session.cwd', () => ({ value: '/repo' }))
@@ -27,7 +29,7 @@ function setup(on: On) {
 
 test('running band draws job metrics and stop invokes workhorse -k', async ($, on) => {
   const { clock, store } = setup(on)
-  store.jobs = { '/jobs/patch': { name: 'patch', session: 'session-1', goal: 'fix', doneWhen: 'unit test', warnedStall: false, warnedTests: false } }
+  store['job:/jobs/patch'] = { name: 'patch', session: 'session-1', goal: 'fix', doneWhen: 'unit test', warnedStall: false, warnedTests: false }
   const calls: string[][] = []
   on('process.run', ($, e) => {
     calls.push([...e.argv])
@@ -92,7 +94,7 @@ test('launch writes argv, stdin and job; completion delivers report and acceptan
     argv: [expect.stringMatching(/\/bin\/workhorse$/), '--detach', '-C', '/repo', '--code', '-n', 'patch', '-e', 'high', '-m', 'codex'],
     init: { cwd: '/repo', env: { WORKHORSE_ALLOW_OPS: '1' }, stdin: 'Goal: fix parser\nContext: baseline.ts rejects input\nConstraints: only parser\nDone when: npm run test:parser' },
   })
-  expect(store.jobs).toEqual({ '/jobs/patch': { name: 'patch', session: 'session-1', goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false } })
+  expect(store).toEqual({ 'job:/jobs/patch': { name: 'patch', session: 'session-1', goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false } })
   expect(argv('/plugin', { ...input, resume: 'review', to_code: true }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-r', 'review', '--code', '-e', 'high', '-m', 'codex'])
   expect(argv('/plugin', { ...input, worktree: 'branch', mode: 'review' }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-w', 'branch', '--review', '-n', 'patch', '-e', 'high', '-m', 'codex'])
   await clock.advance(30000)
@@ -100,7 +102,7 @@ test('launch writes argv, stdin and job; completion delivers report and acceptan
   expect(messages).toHaveLength(1)
   expect(messages[0]).toContain('Fixed the parser')
   expect(messages[0]).toContain(input.done_when)
-  expect(store.jobs).toEqual({})
+  expect(store).toEqual({})
   expect(brief({ goal: 'fix', context: 'baseline.ts', done_when: 'unit test' })).toBe('Goal: fix\nContext: baseline.ts\nDone when: unit test')
   expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { mode: 'ops' } })).toEqual({ decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' })
 })
@@ -127,9 +129,9 @@ test('missing jobs are removed and a failed job does not block other jobs', asyn
   const { clock, store } = setup(on)
   const messages: string[] = []
   const toasts: string[] = []
-  store.jobs = Object.fromEntries(['lost', 'broken', 'ready'].map(name => [`/jobs/${name}`, {
+  Object.assign(store, Object.fromEntries(['lost', 'broken', 'ready'].map(name => [`job:/jobs/${name}`, {
     name, session: 'session-1', goal: 'fix', doneWhen: 'unit test', warnedStall: false, warnedTests: false,
-  }]))
+  }])))
   on('process.run', () => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify([
     { name: 'lost', path: null, state: 'missing' },
     { name: 'broken', path: '/jobs/broken', state: 'done' },
@@ -145,7 +147,30 @@ test('missing jobs are removed and a failed job does not block other jobs', asyn
   expect(messages).toHaveLength(2)
   expect(messages[0]).toContain('job lost 记录已丢失')
   expect(messages[1]).toContain('Ready report')
-  expect(Object.keys(store.jobs as object)).toEqual(['/jobs/broken'])
+  expect(Object.keys(store)).toEqual(['job:/jobs/broken'])
   expect(toasts).toHaveLength(1)
   expect(toasts[0]).toContain('broken')
+})
+
+test('two polls sharing a store submit a done review job only once', async ($, on) => {
+  const { clock, store } = setup(on)
+  const messages: string[] = []
+  store['job:/jobs/review.2'] = { name: 'review.2', session: 'session-1', goal: 'review', doneWhen: '给出结论和证据', warnedStall: false, warnedTests: false }
+  store['job:/jobs/other'] = { name: 'other', session: 'session-2', goal: 'fix', doneWhen: 'unit test', warnedStall: false, warnedTests: false }
+  on('process.run', () => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify([
+    { name: 'review.2', path: '/jobs/review.2', state: 'done', mode: 'review' },
+  ]) } }))
+  on('fs.read', () => ({ value: 'Review evidence' }))
+  on('prompt.submit', ($, e) => {
+    expect(store['job:/jobs/review.2']).toBeUndefined()
+    messages.push(e.text)
+    return { text: e.text }
+  })
+  await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
+  await clock.advance(30000)
+  await clock.advance(30000)
+  expect(messages).toHaveLength(1)
+  expect(messages[0]).toContain('核对结论和证据；要修复就用 resume + to_code 交回')
+  expect(messages[0]).not.toContain('自己运行')
+  expect(Object.keys(store)).toEqual(['job:/jobs/other'])
 })

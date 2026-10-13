@@ -39,33 +39,38 @@ async function stopJob($: EngineInterface, options: PluginOptions, name: string)
 
 async function poll($: EngineInterface, options: PluginOptions) {
   const session = await $.session.id()
-  const jobs = (await $.store.get('jobs') ?? {}) as Record<string, Job>
-  const owned = Object.entries(jobs).filter(([, job]) => job.session === session)
+  const owned: [string, Job][] = []
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith('job:')) continue
+    const job = await $.store.get(key) as Job | undefined
+    if (job?.session === session) owned.push([key, job])
+  }
   if (!owned.length) {
     statuses = []
     $.ui.invalidate('ui.render')
     return
   }
   const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-s', ...owned.map(([, job]) => job.name)], { env: environment(options) })
-  statuses = JSON.parse(result.stdout) as Status[]
+  const polled = JSON.parse(result.stdout) as Status[]
+  statuses = polled
   $.ui.invalidate('ui.render')
-  for (const [path, job] of owned) {
+  for (const [key, job] of owned) {
     try {
-      const status = statuses.find(s => s.name === job.name)!
+      const status = polled.find(s => s.name === job.name)!
       if (status.state === 'missing') {
-        const current = (await $.store.get('jobs')) as Record<string, Job>
-        delete current[path]
-        await $.store.set('jobs', current)
+        if (!await $.store.get(key)) continue
+        await $.store.delete(key)
         void $.prompt.submit({ text: `workhorse: job ${job.name} 记录已丢失` })
       } else if (status.state === 'done' || status.state === 'dead') {
-        const report = status.state === 'done' ? (await $.fs.read(`${path}/report.txt`)).slice(0, 6000) : ''
+        const report = status.state === 'done' ? (await $.fs.read(`${key.slice(4)}/report.txt`)).slice(0, 6000) : ''
         const reminder = status.state === 'dead'
           ? `用 workhorse -t ${job.name} 看日志`
-          : `对照 brief 读 diff，自己运行 ${job.doneWhen}；要修复就用 mcp__workhorse__run 工具 resume ${job.name} 交回`
+          : status.mode === 'review'
+            ? '核对结论和证据；要修复就用 resume + to_code 交回'
+            : `对照 brief 读 diff，自己运行 ${job.doneWhen}；要修复就用 mcp__workhorse__run 工具 resume ${job.name} 交回`
+        if (!await $.store.get(key)) continue
+        await $.store.delete(key)
         void $.prompt.submit({ text: `workhorse: job ${job.name} finished\n${report}\n${reminder}` })
-        const current = (await $.store.get('jobs')) as Record<string, Job>
-        delete current[path]
-        await $.store.set('jobs', current)
       } else if (status.state === 'running') {
         if (status.idle_min >= Number(options.stall_minutes) && !job.warnedStall) {
           job.warnedStall = true
@@ -79,9 +84,7 @@ async function poll($: EngineInterface, options: PluginOptions) {
           await $.ui.toast(text)
           void $.prompt.submit({ text })
         }
-        const current = (await $.store.get('jobs')) as Record<string, Job>
-        current[path] = job
-        await $.store.set('jobs', current)
+        if (await $.store.get(key)) await $.store.set(key, job)
       }
     } catch (error) {
       await $.ui.toast(`workhorse: job ${job.name} 状态处理失败：${String(error)}`)
@@ -112,7 +115,16 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({ name: 'workhorse-jobs', description: 'Open and list Codex jobs', immediate: true })
     await $.command.register({ name: 'workhorse-kill', description: 'Kill a Codex job', argumentHint: '<name>', immediate: true })
-    $.clock.every(30000, () => poll($, options))
+    let polling = false
+    $.clock.every(30000, async () => {
+      if (polling) return
+      polling = true
+      try {
+        await poll($, options)
+      } finally {
+        polling = false
+      }
+    })
     return next(e)
   })
 
@@ -180,9 +192,7 @@ export const register: Register = (on, options) => {
     const result = await $.process.run(argv($.plugin.root, input, cwd), { cwd, env: environment(options), stdin: brief(input) })
     if (result.exitCode !== 0) return { result: result.stderr }
     const job = started(result.stdout)
-    const jobs = (await $.store.get('jobs') ?? {}) as Record<string, Job>
-    jobs[job.path] = { name: job.name, session: await $.session.id(), goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false }
-    await $.store.set('jobs', jobs)
+    await $.store.set(`job:${job.path}`, { name: job.name, session: await $.session.id(), goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false })
     return { result: `started ${job.name}; 报告会以 workhorse 消息送达，不要轮询。` }
   })
 
