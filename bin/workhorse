@@ -8,33 +8,58 @@ set -uo pipefail
 
 root="${WORKHORSE_HOME:-$HOME/.cache/workhorse}"
 mkdir -p "$root"
-find "$root" -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} + 2>/dev/null
-dir="$PWD" name="" mode="" resume=0 model="" effort="" dir_set=0 wt="" detach=0
+dir="$PWD" name="" mode="" resume=0 model="" effort="" dir_set=0 wt="" detach=0 uncommitted=0
 newest() { ls -t "$root" | grep -v '^LAST$' | head -1; }
 alive() { [[ -f "$1/pid" ]] && kill -0 "$(cat "$1/pid")" 2>/dev/null; }
+base_of() {
+  if [[ -f "$root/$1/base.txt" ]]; then cat "$root/$1/base.txt"
+  else
+    local base; base="$(printf '%s\n' "$1" | sed -E 's/(\.[0-9]+)+$//')"
+    if [[ -d "$root/$base" ]]; then printf '%s\n' "$base"; else printf '%s\n' "$1"; fi
+  fi
+}
+latest() { ls -dt "$root/$1" "$root/$1".* 2>/dev/null | head -1; }
+resolve() {
+  local base last_run; base="$(base_of "$1")"
+  if [[ "$1" == "$base" ]]; then last_run="$(latest "$base")"; else last_run="$root/$1"; fi
+  printf '%s\n' "${last_run:-$root/$1}"
+}
 tree() { local c; for c in $(pgrep -P "$1"); do tree "$c"; done; echo "$1"; }
 # Snapshot the whole working tree (untracked files included) through a throwaway index; the real index is untouched.
 snap() { local idx; idx="$(mktemp)"; rm -f "$idx"
   GIT_INDEX_FILE="$idx" git -C "$1" add -A :/ 2>/dev/null && GIT_INDEX_FILE="$idx" git -C "$1" write-tree; rm -f "$idx"; }
-TESTS='pytest|py\.test|unittest|(npm|pnpm|yarn|bun) (run )?test|vitest|jest|go test|cargo test|ctest|make (check|test)|tox|nox|rspec'
+TESTS='(^|&&|\|\||[;\n])\s*([A-Za-z_][A-Za-z_0-9]*=[^\s]+\s+)*([^\s;&|]*/)?((python[0-9.]*\s+-m\s+)?(pytest|py\.test|unittest)|(npm|pnpm|yarn|bun)\s+(run\s+)?test|vitest|jest|go\s+test|cargo\s+test|ctest|make\s+(check|test)|tox|nox|rspec)(\s|$|[;&|])'
+COMMAND_JQ='
+  def command_body:
+    if test("^/bin/(zsh|bash) -lc ") then
+      sub("^/bin/(zsh|bash) -lc "; "") | sub("^[\u0027\"]"; "") | sub("[\u0027\"]$"; "")
+    else . end |
+    split("\u0027\\\u0027\u0027") | join("\u0027") |
+    split("\u0027\"\u0027\"\u0027") | join("\u0027") |
+    split("\\\"") | join("\"");
+  def command_display: command_body | (split("\n")[0] // "") | .[:60];
+  def is_test: command_body | test($tests);
+'
 
 case "${1:-}" in
   -s)
     shift
     if (( $# == 0 )); then
       for j in "$root"/*; do
-        [[ -d "$j" && ! -f "$j/report.txt" ]] && alive "$j" && set -- "$@" "${j##*/}"
+        [[ -d "$j" ]] && { [[ -f "$j/finishing" ]] || { [[ ! -f "$j/report.txt" ]] && alive "$j"; }; } && set -- "$@" "${j##*/}"
       done
     fi
     now=$(date +%s)
     for name in "$@"; do
-      j="$root/$name"
+      j="$(resolve "$name")"; name="${j##*/}"; base="$(base_of "$name")"
+      round=1; [[ "$name" == "$base".* ]] && round="${name##*.}"
       if [[ ! -d "$j" ]]; then
-        jq -n --arg name "$name" '{name: $name, state: "missing", activity: "", files: 0}'
+        jq -n --arg name "$name" --arg base "$base" --argjson round "$round" '{name: $name, base: $base, round: $round, state: "missing", activity: "", busy: "", busy_min: 0, files: 0}'
         continue
       fi
       report=""
-      if [[ -f "$j/report.txt" ]]; then
+      if [[ -f "$j/finishing" ]]; then state=running
+      elif [[ -f "$j/report.txt" ]]; then
         state=done; report=$(head -1 "$j/report.txt")
       elif alive "$j"; then state=running
       else state=dead; fi
@@ -46,22 +71,27 @@ case "${1:-}" in
         modified=$(perl -e 'print((stat shift)[9])' "$log")
       fi
       jq -s --arg name "$name" --arg path "$(cd "$j" && pwd)" \
+        --arg base "$base" --argjson round "$round" --argjson now "$now" --argjson modified "$modified" \
         --arg dir "$(cat "$j/dir.txt" 2>/dev/null)" \
         --arg state "$state" --arg mode "$(cat "$j/mode.txt" 2>/dev/null)" \
         --arg model "$(cat "$j/model.txt" 2>/dev/null)" --arg effort "$(cat "$j/effort.txt" 2>/dev/null)" \
         --arg report "$report" --arg tests "$TESTS" --argjson started "$started" \
-        --argjson elapsed "$(( (now - started) / 60 ))" --argjson idle "$(( (now - modified) / 60 ))" '
+        --argjson elapsed "$(( (now - started) / 60 ))" --argjson idle "$(( (now - modified) / 60 ))" "$COMMAND_JQ"'
         [.[] | select(.type == "item.completed" and .item.type == "command_execution")] as $commands |
+        ([.[] | select(.type == "item.started" and .item.type == "command_execution")] | last) as $last_command |
+        ($last_command != null and (any($commands[]; .item.id == $last_command.item.id) | not)) as $busy |
         [.[] | select(.type | startswith("item.")) | .item] as $items |
-        {name: $name, path: $path, dir: $dir, state: $state, mode: $mode, model: $model, effort: $effort,
+        {name: $name, base: $base, round: $round, path: $path, dir: $dir, state: $state, mode: $mode, model: $model, effort: $effort,
          activity: ($items | last | if .type == "file_change" then "Editing " + (.changes[0].path | split("/") | last)
-                    elif .type == "command_execution" then (.command // "" | if startswith("/bin/zsh -lc ") then ltrimstr("/bin/zsh -lc ") | sub("^[\u0027\"]"; "") | sub("[\u0027\"]$"; "") else . end)
+                    elif .type == "command_execution" then (.command // "" | command_display)
                     elif .type == "agent_message" then (.text // "") else "" end | (split("\n")[0] // "") | .[:60]),
          files: ([.[] | select(.type == "item.completed" and .item.type == "file_change") | .item.changes[].path] | unique | length),
          exit: (if $state == "done" then ($report | capture(" exit=(?<code>-?[0-9]+) ").code | tonumber) else null end),
          started: $started, elapsed_min: $elapsed, idle_min: $idle,
+         busy: (if $busy then ($last_command.item.command | command_display) else "" end),
+         busy_min: (if $busy then (($now - ($last_command.workhorse_time // $modified)) / 60 | floor | if . < 0 then 0 else . end) else 0 end),
          cmds: ($commands | length),
-         tests: ([$commands[] | select(.item.command | test($tests))] | length),
+         tests: ([$commands[] | select(.item.command | is_test)] | length),
          tokens: (map(select(.type == "turn.completed") | .usage.input_tokens + .usage.output_tokens) | add // 0),
          last_cmds: ([.[] | select(.type == "item.started" and .item.type == "command_execution") | .item.command] | .[-5:]),
          report: (if $state == "done" then $report else null end)}' < <(jq -c -R 'fromjson? // empty' "$log")
@@ -79,13 +109,13 @@ case "${1:-}" in
       printf '%-30s %s\n' "$d" "$st"
     done; exit 0 ;;
   -t)
-    j="$root/${2:-$(newest)}"
+    j="$(resolve "${2:-$(newest)}")"
     cmds=0 tests=0 log="$j/codex.log"
     if [[ -f "$j/events.jsonl" ]]; then
       log="$j/events.jsonl"
       jq -r 'select(.type == "item.started" and .item.type == "command_execution") | .item.command' "$log" | tail -n 8 | cut -c1-200
       cmds=$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$log")
-      tests=$(jq -s --arg tests "$TESTS" '[.[] | select(.type == "item.completed" and .item.type == "command_execution") | select(.item.command | test($tests))] | length' "$log")
+      tests=$(jq -s --arg tests "$TESTS" "$COMMAND_JQ"'[.[] | select(.type == "item.completed" and .item.type == "command_execution") | select(.item.command | is_test)] | length' "$log")
     fi
     if [[ -f "$j/start" ]]; then started=$(cat "$j/start")
     else started=$(perl -e 'print((stat shift)[9])' "$j/codex.log"); fi
@@ -94,16 +124,23 @@ case "${1:-}" in
          "$(( (now - started) / 60 ))min elapsed," \
          "last output $(( (now - $(perl -e 'print((stat shift)[9])' "$log")) / 60 ))min ago$(alive "$j" || echo ', not running')"; exit 0 ;;
   -k)
-    j="$root/${2:-$(newest)}"
+    j="$(resolve "${2:-$(newest)}")"
     alive "$j" || { echo "not running"; exit 0; }
     kill -TERM $(tree "$(cat "$j/pid")") 2>/dev/null; echo "stopped $(basename "$j")"; exit 0 ;;
   --clean)
     j="$root/${2:?usage: workhorse --clean name}"; w="$(cat "$j/worktree.txt" 2>/dev/null)"
     [[ -n "$w" ]] || { echo "workhorse: job '$2' has no worktree" >&2; exit 2; }
     main="$(cat "$j/repo.txt")"
-    git -C "$main" merge-base --is-ancestor "workhorse/$2" HEAD || { echo "workhorse: branch workhorse/$2 is not merged into $(git -C "$main" branch --show-current); merge it first" >&2; exit 2; }
-    git -C "$main" worktree remove "$w" && git -C "$main" branch -d "workhorse/$2"; exit $? ;;
+    branch="$(cat "$j/branch.txt")"
+    git -C "$main" merge-base --is-ancestor "$branch" HEAD || { echo "workhorse: branch $branch is not merged into $(git -C "$main" branch --show-current); merge it first" >&2; exit 2; }
+    git -C "$main" worktree remove "$w" && git -C "$main" branch -d "$branch"; exit $? ;;
 esac
+
+while IFS= read -r -d '' j; do
+  [[ -f "$j/pid" || -f "$j/finishing" ]] && continue
+  [[ -f "$j/worktree.txt" && -e "$(cat "$j/worktree.txt")" ]] && continue
+  rm -rf "$j"
+done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -mtime +14 -print0)
 
 config_file="${XDG_CONFIG_HOME:-$HOME/.config}/workhorse/config"
 if [[ -f "$config_file" ]]; then
@@ -138,40 +175,49 @@ task="$(cat)"
 
 session="" prev_mode=""
 if (( resume )); then
-  name="${name:-$(cat "$root/LAST" 2>/dev/null)}"; prev="$root/$name"
+  name="${name:-$(cat "$root/LAST" 2>/dev/null)}"; base="$(base_of "$name")"; prev="$root/$base"
   for j in "$prev" "$prev".*; do
-    [[ -d "$j" ]] && alive "$j" && { echo "workhorse: $(basename "$j") is still running; wait for it or workhorse -k it first" >&2; exit 2; }
+    [[ -d "$j" ]] && { [[ -f "$j/finishing" ]] || alive "$j"; } && { echo "workhorse: $(basename "$j") is still running; wait for it or workhorse -k it first" >&2; exit 2; }
   done
-  session="$(cat "$prev/session.txt" 2>/dev/null)"
+  last_run="$(latest "$base")"
+  session="$(cat "$last_run/session.txt" 2>/dev/null)"
   [[ -n "$session" ]] || { echo "workhorse: no session for job '$name'" >&2; exit 2; }
-  last_run="$(ls -dt "$prev" "$prev".* 2>/dev/null | head -1)"
   [[ -f "$last_run/lang.txt" ]] && WORKHORSE_LANG="$(cat "$last_run/lang.txt")"
   prev_mode="$(cat "$last_run/mode.txt")"
-  (( dir_set )) || dir="$(cat "$prev/dir.txt")"
+  (( dir_set )) || dir="$(cat "$last_run/dir.txt")"
   : "${mode:=$prev_mode}"
   [[ "$mode" == "$prev_mode" ]] && { : "${model:=$(cat "$last_run/model.txt" 2>/dev/null)}"; : "${effort:=$(cat "$last_run/effort.txt" 2>/dev/null)}"; }
-  n=2; while [[ -d "$prev.$n" ]]; do n=$((n+1)); done
+  n=2
+  for j in "$prev".*; do
+    [[ -d "$j" ]] || continue
+    round="${j#"$prev."}"
+    [[ "$round" =~ ^[0-9]+$ ]] && (( 10#$round >= n )) && n=$((10#$round + 1))
+  done
   out="$prev.$n"
 else
   if [[ -n "$wt" ]]; then
     top="$(git -C "$dir" rev-parse --show-toplevel)" || exit 2
     main="$(dirname "$(git -C "$top" rev-parse --path-format=absolute --git-common-dir)")"
+    uncommitted=$(git -C "$main" status --porcelain=v1 | wc -l | tr -d ' ')
     dir="$(dirname "$main")/$(basename "$main")-$wt"
     [[ -d "$dir" ]] || git -C "$top" worktree add -q "$dir" -b "workhorse/$wt" || exit 2
+    branch="$(git -C "$dir" branch --show-current)"
     name="${name:-$wt}"
   fi
   dir="$(cd "$dir" && pwd)" || exit 2
   name="${name:-$(basename "$dir")-$(date +%m%d-%H%M%S)}"
   out="$root/$name"
+  base="$name"
   [[ -e "$out" ]] && { echo "workhorse: job '$name' already exists; pick another -n or use -r" >&2; exit 2; }
 fi
 : "${mode:=code}"
 [[ "$mode" == ops && "$WORKHORSE_ALLOW_OPS" == 0 ]] && { echo "workhorse: --ops is disabled by WORKHORSE_ALLOW_OPS=0" >&2; exit 2; }
 mkdir -p "$out"
-echo "$name" > "$root/LAST"
+echo "${out##*/}" > "$root/LAST"
+printf '%s\n' "$base" > "$out/base.txt"
 printf '%s\n' "$dir" > "$out/dir.txt"; printf '%s\n' "$mode" > "$out/mode.txt"
-[[ -n "$wt" ]] && { printf '%s\n' "$dir" > "$out/worktree.txt"; printf '%s\n' "$main" > "$out/repo.txt"; }
-isgit=0; git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 && { isgit=1; pre="$(snap "$dir")"; }
+[[ -n "$wt" ]] && { printf '%s\n' "$dir" > "$out/worktree.txt"; printf '%s\n' "$main" > "$out/repo.txt"; printf '%s\n' "$branch" > "$out/branch.txt"; }
+isgit=0; [[ "$mode" != review ]] && git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 && { isgit=1; pre="$(snap "$dir")"; }
 
 case "$mode" in
   code)   sandbox=workspace-write;    : "${model:=$WORKHORSE_MODEL_CODE}"; deff="$WORKHORSE_EFFORT_CODE" ;;
@@ -234,22 +280,24 @@ for mcp in ${disabled_mcp[@]+"${disabled_mcp[@]}"}; do cfg+=(-c "mcp_servers.$mc
 run_job() {
 start=$(date +%s)
 printf '%s\n' "$start" > "$out/start"
-if [[ -n "$session" ]]; then
-  (cd "$dir" && exec codex exec resume "${cfg[@]}" --json --skip-git-repo-check -o "$out/final.md" "$session" - \
-     < "$out/prompt.md" > "$out/events.jsonl" 2> "$out/codex.log") &
-else
-  codex exec "${cfg[@]}" -C "$dir" --json --skip-git-repo-check -o "$out/final.md" - < "$out/prompt.md" > "$out/events.jsonl" 2> "$out/codex.log" &
-fi
+(
+  if [[ -n "$session" ]]; then
+    (cd "$dir" && exec codex exec resume "${cfg[@]}" --json --skip-git-repo-check -o "$out/final.md" "$session" - \
+       < "$out/prompt.md" 2> "$out/codex.log")
+  else
+    codex exec "${cfg[@]}" -C "$dir" --json --skip-git-repo-check -o "$out/final.md" - < "$out/prompt.md" 2> "$out/codex.log"
+  fi | jq -c -R --unbuffered 'fromjson? // empty | . + {workhorse_time: now}' > "$out/events.jsonl"
+) &
 echo $! > "$out/pid"
 wait $!; rc=$?
-rm -f "$out/pid"
+touch "$out/finishing"
 
 sid="$(jq -r 'select(.type == "thread.started") | .thread_id' "$out/events.jsonl")"
 printf '%s\n' "${sid:-$session}" > "$out/session.txt"
 {
   echo "== $(basename "$out") exit=$rc $mode $model/$effort/$tier $(( ($(date +%s) - start + 59) / 60 ))min" \
-       "tokens=$(jq -s 'map(select(.type == "turn.completed") | .usage.input_tokens + .usage.output_tokens) | add // 0' "$out/events.jsonl") cmds=$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$out/events.jsonl")" \
-       "tests=$(jq -s --arg tests "$TESTS" '[.[] | select(.type == "item.completed" and .item.type == "command_execution") | select(.item.command | test($tests))] | length' "$out/events.jsonl")"
+       "$(jq -sr '[.[] | select(.type == "turn.completed") | .usage] | "tokens=\(map(.input_tokens - (.cached_input_tokens // 0) + .output_tokens) | add // 0) cached=\(map(.cached_input_tokens // 0) | add // 0)"' "$out/events.jsonl") cmds=$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$out/events.jsonl")" \
+       "tests=$(jq -s --arg tests "$TESTS" "$COMMAND_JQ"'[.[] | select(.type == "item.completed" and .item.type == "command_execution") | select(.item.command | is_test)] | length' "$out/events.jsonl")"
   [[ -n "$session" && -n "$sid" && "$sid" != "$session" ]] && echo "!! resume started a new thread; context did not carry over"
   (( rc )) && tail -n 20 "$out/codex.log"
   cat "$out/final.md" 2>/dev/null; echo
@@ -257,10 +305,11 @@ printf '%s\n' "${sid:-$session}" > "$out/session.txt"
     post="$(snap "$dir")"
     if [[ "$pre" == "$post" ]]; then echo "(no file changes)"
     else git -C "$dir" diff --stat "$pre" "$post" | tail -n 15; fi
-    [[ -n "$wt" ]] && echo "worktree: $dir (branch workhorse/$wt)"
   fi
+  [[ -n "$wt" ]] && echo "worktree: $dir (branch $branch)"
 } | if (( detach )); then cat > "$out/report.tmp"; else tee "$out/report.tmp"; fi
 mv "$out/report.tmp" "$out/report.txt"
+rm -f "$out/finishing" "$out/pid"
 exit "$rc"
 }
 
@@ -269,7 +318,8 @@ if (( detach )); then
     POSIX::setsid();
     for (glob "/dev/fd/*") { m{/(\d+)$}; POSIX::close($1) if $1 > 2; }
     exec @ARGV;
-  ' bash -u -o pipefail -c "$(declare -p dir out session cfg mode model effort tier isgit wt TESTS detach
+  ' bash -u -o pipefail -c "$(declare -p dir out session cfg mode model effort tier isgit wt TESTS COMMAND_JQ detach
+               [[ -n "$wt" ]] && declare -p branch
                (( isgit )) && declare -p pre
                declare -f snap run_job
                echo run_job)" < /dev/null > /dev/null 2>&1 &
@@ -283,6 +333,7 @@ if (( detach )); then
     sleep 0.01
   done
   printf 'started %s %s\n' "$(basename "$out")" "$out"
+  (( uncommitted )) && printf 'warning: %s uncommitted changes in %s are not in the worktree\n' "$uncommitted" "$main"
   exit 0
 fi
 run_job
