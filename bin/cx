@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cx: hand a task to Codex like a subagent. The task text comes on stdin; the short report goes to stdout.
-#   cx [-C dir | -w name] [-n name] [--code|--review|--ops] [-m model] [-e effort] <<'EOF' ... EOF   new job
-#   cx -r [name] [--code] <<'EOF' ... EOF    follow-up in the same Codex thread (default: last job; --code turns a review into a fix)
+#   cx [-C dir | -w name] [-n name] [--code|--review|--ops] [-m model] [-e effort] [--detach] <<'EOF' ... EOF   new job
+#   cx -r [name] [--code] [--detach] <<'EOF' ... EOF    follow-up in the same Codex thread (default: last job; --code turns a review into a fix)
 #   cx -l | cx -t [name] | cx -k [name]      list jobs | what a job is doing | stop a job
 #   cx --clean name                          remove the worktree and branch that `-w name` created
 set -uo pipefail
@@ -9,7 +9,7 @@ set -uo pipefail
 root="${CX_HOME:-$HOME/.cache/cx}"
 mkdir -p "$root"
 find "$root" -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} + 2>/dev/null
-dir="$PWD" name="" mode="" resume=0 model="" effort="" dir_set=0 wt=""
+dir="$PWD" name="" mode="" resume=0 model="" effort="" dir_set=0 wt="" detach=0
 newest() { ls -t "$root" | grep -v '^LAST$' | head -1; }
 alive() { [[ -f "$1/pid" ]] && kill -0 "$(cat "$1/pid")" 2>/dev/null; }
 tree() { local c; for c in $(pgrep -P "$1"); do tree "$c"; done; echo "$1"; }
@@ -78,10 +78,12 @@ while [[ $# -gt 0 ]]; do
     --code|--review|--ops) mode="${1#--}"; shift ;;
     -m) model="$2"; shift 2 ;;
     -e) effort="$2"; shift 2 ;;
+    --detach) detach=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
+(( detach )) && root="$(cd "$root" && pwd)"
 task="$(cat)"
 [[ -n "${task// }" ]] || { echo "cx: task text goes on stdin" >&2; exit 2; }
 
@@ -178,6 +180,7 @@ for mcp in ${disabled_mcp[@]+"${disabled_mcp[@]}"}; do cfg+=(-c "mcp_servers.$mc
 [[ $sandbox == workspace-write ]] && cfg+=(-c "sandbox_workspace_write.network_access=true"
                                           -c "sandbox_workspace_write.writable_roots=[\"$out\"]")
 
+run_job() {
 start=$(date +%s)
 printf '%s\n' "$start" > "$out/start"
 if [[ -n "$session" ]]; then
@@ -205,5 +208,30 @@ printf '%s\n' "${sid:-$session}" > "$out/session.txt"
     else git -C "$dir" diff --stat "$pre" "$post" | tail -n 15; fi
     [[ -n "$wt" ]] && echo "worktree: $dir (branch cx/$wt)"
   fi
-} | tee "$out/report.txt"
+} | if (( detach )); then cat > "$out/report.tmp"; else tee "$out/report.tmp"; fi
+mv "$out/report.tmp" "$out/report.txt"
 exit "$rc"
+}
+
+if (( detach )); then
+  perl -MPOSIX -e '
+    POSIX::setsid();
+    for (glob "/dev/fd/*") { m{/(\d+)$}; POSIX::close($1) if $1 > 2; }
+    exec @ARGV;
+  ' bash -u -o pipefail -c "$(declare -p dir out session cfg mode model effort tier isgit wt TESTS detach
+               (( isgit )) && declare -p pre
+               declare -f snap run_job
+               echo run_job)" < /dev/null > /dev/null 2>&1 &
+  deadline=$((SECONDS + 5))
+  while [[ ! -f "$out/pid" && ! -f "$out/report.txt" ]]; do
+    if (( SECONDS >= deadline )); then
+      echo "cx: detached job failed to start" >&2
+      [[ -f "$out/codex.log" ]] && tail -n 10 "$out/codex.log" >&2
+      exit 1
+    fi
+    sleep 0.01
+  done
+  printf 'started %s %s\n' "$(basename "$out")" "$out"
+  exit 0
+fi
+run_job
