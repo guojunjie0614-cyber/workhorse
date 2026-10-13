@@ -20,12 +20,12 @@ function setup(on: On) {
   on('session.id', () => ({ value: 'session-1' }))
   on('session.cwd', () => ({ value: '/repo' }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('tool.register', () => ({ value: { tool: 'mcp__workhorse__cx' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__workhorse__run' } }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   return { clock, store }
 }
 
-test('running band draws job metrics and stop invokes cx -k', async ($, on) => {
+test('running band draws job metrics and stop invokes workhorse -k', async ($, on) => {
   const { clock, store } = setup(on)
   store.jobs = { '/jobs/patch': { name: 'patch', session: 'session-1', goal: 'fix', doneWhen: 'unit test', warnedStall: false, warnedTests: false } }
   const calls: string[][] = []
@@ -43,28 +43,28 @@ test('running band draws job metrics and stop invokes cx -k', async ($, on) => {
   } })
   expect(await ui.find({ type: 'Text', text: 'patch · code · 5m · cmds 4 · tests 1 · idle 2m' })).toBeDefined()
   await ui.press({ key: 'stop:patch' })
-  expect(calls[1]).toEqual([expect.stringMatching(/\/bin\/cx$/), '-k', 'patch'])
+  expect(calls[1]).toEqual([expect.stringMatching(/\/bin\/workhorse$/), '-k', 'patch'])
   await ui.unmount()
 })
 
-test('cx ToolUse draws the goal in a compact line', async ($, on) => {
+test('workhorse ToolUse draws the goal in a compact line', async ($, on) => {
   setup(on)
   const ui = await $.ui.mount({ plugin: 'workhorse', component: 'ToolUse', surface: 'terminal', requestId: 'call-1', props: {
-    tool_use_id: 'call-1', tool: 'mcp__workhorse__cx', input: { name: 'patch', goal: 'fix parser', mode: 'code', effort: 'high' },
+    tool_use_id: 'call-1', tool: 'mcp__workhorse__run', input: { name: 'patch', goal: 'fix parser', mode: 'code', effort: 'high' },
     isRunning: true, isErrored: false, isInterrupted: false,
   } })
-  expect(await ui.find({ type: 'Text', text: 'cx ▸ patch · code · high — fix parser' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'workhorse ▸ patch · code · high — fix parser' })).toBeDefined()
   await ui.unmount()
 })
 
 test('lint refuses absent completion criteria and banned phrases in instruction fields', async ($, on) => {
   setup(on)
-  const missing = await $.tool.call({ tool: 'mcp__workhorse__cx', goal: 'fix', context: '' })
+  const missing = await $.tool.call({ tool: 'mcp__workhorse__run', goal: 'fix', context: '' })
   expect(missing.deny).toContain('done_when')
-  const empty = await $.tool.call({ tool: 'mcp__workhorse__cx', goal: 'fix', context: '', done_when: '  ' })
+  const empty = await $.tool.call({ tool: 'mcp__workhorse__run', goal: 'fix', context: '', done_when: '  ' })
   expect(empty.deny).toContain('done_when')
   for (const field of ['goal', 'constraints', 'done_when']) {
-    const banned = await $.tool.call({ tool: 'mcp__workhorse__cx', goal: 'fix', context: '', done_when: 'unit test', [field]: 'BASELINE' })
+    const banned = await $.tool.call({ tool: 'mcp__workhorse__run', goal: 'fix', context: '', done_when: 'unit test', [field]: 'BASELINE' })
     expect(banned.deny).toContain(field)
   }
 })
@@ -86,23 +86,23 @@ test('launch writes argv, stdin and job; completion delivers report and acceptan
   on('prompt.submit', ($, e) => { messages.push(e.text); return { text: e.text } })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
   const input = { goal: 'fix parser', context: 'baseline.ts rejects input', constraints: 'only parser', done_when: 'npm run test:parser', name: 'patch', effort: 'high' as const, model: 'codex' }
-  const result = await $.tool.call({ tool: 'mcp__workhorse__cx', ...input })
+  const result = await $.tool.call({ tool: 'mcp__workhorse__run', ...input })
   expect(result.result).toContain('patch')
   expect(calls[0]).toEqual({
-    argv: [expect.stringMatching(/\/bin\/cx$/), '--detach', '-C', '/repo', '--code', '-n', 'patch', '-e', 'high', '-m', 'codex'],
-    init: { cwd: '/repo', env: { CX_ALLOW_OPS: '1' }, stdin: 'Goal: fix parser\nContext: baseline.ts rejects input\nConstraints: only parser\nDone when: npm run test:parser' },
+    argv: [expect.stringMatching(/\/bin\/workhorse$/), '--detach', '-C', '/repo', '--code', '-n', 'patch', '-e', 'high', '-m', 'codex'],
+    init: { cwd: '/repo', env: { WORKHORSE_ALLOW_OPS: '1' }, stdin: 'Goal: fix parser\nContext: baseline.ts rejects input\nConstraints: only parser\nDone when: npm run test:parser' },
   })
   expect(store.jobs).toEqual({ '/jobs/patch': { name: 'patch', session: 'session-1', goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false } })
-  expect(argv('/plugin', { ...input, resume: 'review', to_code: true }, '/repo')).toEqual(['/plugin/bin/cx', '--detach', '-r', 'review', '--code', '-e', 'high', '-m', 'codex'])
-  expect(argv('/plugin', { ...input, worktree: 'branch', mode: 'review' }, '/repo')).toEqual(['/plugin/bin/cx', '--detach', '-w', 'branch', '--review', '-n', 'patch', '-e', 'high', '-m', 'codex'])
+  expect(argv('/plugin', { ...input, resume: 'review', to_code: true }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-r', 'review', '--code', '-e', 'high', '-m', 'codex'])
+  expect(argv('/plugin', { ...input, worktree: 'branch', mode: 'review' }, '/repo')).toEqual(['/plugin/bin/workhorse', '--detach', '-w', 'branch', '--review', '-n', 'patch', '-e', 'high', '-m', 'codex'])
   await clock.advance(30000)
-  expect(calls[1]).toEqual({ argv: [expect.stringMatching(/\/bin\/cx$/), '-s', 'patch'], init: { env: { CX_ALLOW_OPS: '1' } } })
+  expect(calls[1]).toEqual({ argv: [expect.stringMatching(/\/bin\/workhorse$/), '-s', 'patch'], init: { env: { WORKHORSE_ALLOW_OPS: '1' } } })
   expect(messages).toHaveLength(1)
   expect(messages[0]).toContain('Fixed the parser')
   expect(messages[0]).toContain(input.done_when)
   expect(store.jobs).toEqual({})
   expect(brief({ goal: 'fix', context: 'baseline.ts', done_when: 'unit test' })).toBe('Goal: fix\nContext: baseline.ts\nDone when: unit test')
-  expect(await $.tool.check({ tool: 'mcp__workhorse__cx', input: { mode: 'ops' } })).toEqual({ decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' })
+  expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { mode: 'ops' } })).toEqual({ decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' })
 })
 
 test('stall and excess-test warnings each notify only once', async ($, on) => {
@@ -115,7 +115,7 @@ test('stall and excess-test warnings each notify only once', async ($, on) => {
   on('prompt.submit', ($, e) => { messages.push(e.text); return { text: e.text } })
   on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
   await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  await $.tool.call({ tool: 'mcp__workhorse__cx', goal: 'fix', context: '', done_when: 'unit test' })
+  await $.tool.call({ tool: 'mcp__workhorse__run', goal: 'fix', context: '', done_when: 'unit test' })
   await clock.advance(60000)
   expect(messages).toHaveLength(2)
   expect(toasts).toEqual(messages)

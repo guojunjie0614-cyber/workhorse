@@ -11,7 +11,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 cat > /dev/null
-sleep "${CX_STUB_SLEEP:-0}"
+sleep "${WORKHORSE_STUB_SLEEP:-0}"
 [[ -n "$out" ]] && echo done > "$out"
 if (( json )); then cat "$here/fixtures/events.jsonl"
 else printf 'session id: 01a1330a-d704-7e43-8177-ccc8441338d4\nexec\n/bin/zsh -lc ls\nexec\n/bin/zsh -lc pytest\ntokens used\n42667\n'; fi

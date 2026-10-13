@@ -8,30 +8,32 @@ let selectedJob = ''
 let jobOutput = ''
 
 async function refreshPane($: EngineInterface, options: PluginOptions) {
-  const list = await $.process.run([`${$.plugin.root}/bin/cx`, '-l'], { env: environment(options) })
+  const list = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-l'], { env: environment(options) })
   recentJobs = jobRows(list.stdout)
   if (!selectedJob && recentJobs.length) selectedJob = recentJobs[0]!.name
   jobOutput = list.stderr
   if (selectedJob) {
-    const result = await $.process.run([`${$.plugin.root}/bin/cx`, '-s', selectedJob], { env: environment(options) })
+    const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-s', selectedJob], { env: environment(options) })
     const [status] = JSON.parse(result.stdout) as Status[]
     if (status!.state === 'done') {
       jobOutput = await $.fs.read(`${status!.path}/report.txt`)
     } else {
-      const log = await $.process.run([`${$.plugin.root}/bin/cx`, '-t', selectedJob], { env: environment(options) })
+      const log = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-t', selectedJob], { env: environment(options) })
       jobOutput = log.stdout + log.stderr
     }
   }
   $.ui.invalidate('ui.render')
+  return list.stdout + list.stderr
 }
 
 async function openPane($: EngineInterface, options: PluginOptions) {
-  await refreshPane($, options)
-  await $.ui.open({ id: 'cx', title: 'cx', focus: true })
+  const text = await refreshPane($, options)
+  await $.ui.open({ id: 'workhorse', title: 'workhorse', focus: true })
+  return text
 }
 
 async function stopJob($: EngineInterface, options: PluginOptions, name: string) {
-  const result = await $.process.run([`${$.plugin.root}/bin/cx`, '-k', name], { env: environment(options) })
+  const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-k', name], { env: environment(options) })
   await $.ui.toast(result.stdout + result.stderr)
 }
 
@@ -44,7 +46,7 @@ async function poll($: EngineInterface, options: PluginOptions) {
     $.ui.invalidate('ui.render')
     return
   }
-  const result = await $.process.run([`${$.plugin.root}/bin/cx`, '-s', ...owned.map(([, job]) => job.name)], { env: environment(options) })
+  const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-s', ...owned.map(([, job]) => job.name)], { env: environment(options) })
   statuses = JSON.parse(result.stdout) as Status[]
   $.ui.invalidate('ui.render')
   for (const [path, job] of owned) {
@@ -58,8 +60,8 @@ async function poll($: EngineInterface, options: PluginOptions) {
       } else if (status.state === 'done' || status.state === 'dead') {
         const report = status.state === 'done' ? (await $.fs.read(`${path}/report.txt`)).slice(0, 6000) : ''
         const reminder = status.state === 'dead'
-          ? `用 cx -t ${job.name} 看日志`
-          : `对照 brief 读 diff，自己运行 ${job.doneWhen}；要修复就用 cx 工具 resume ${job.name} 交回`
+          ? `用 workhorse -t ${job.name} 看日志`
+          : `对照 brief 读 diff，自己运行 ${job.doneWhen}；要修复就用 mcp__workhorse__run 工具 resume ${job.name} 交回`
         void $.prompt.submit({ text: `workhorse: job ${job.name} finished\n${report}\n${reminder}` })
         const current = (await $.store.get('jobs')) as Record<string, Job>
         delete current[path]
@@ -67,13 +69,13 @@ async function poll($: EngineInterface, options: PluginOptions) {
       } else if (status.state === 'running') {
         if (status.idle_min >= Number(options.stall_minutes) && !job.warnedStall) {
           job.warnedStall = true
-          const text = `workhorse: job ${job.name} 已 ${status.idle_min} 分钟无输出，用 cx -t ${job.name} 查看，卡住就 cx -k ${job.name} 后把 brief 缩小重派`
+          const text = `workhorse: job ${job.name} 已 ${status.idle_min} 分钟无输出，用 workhorse -t ${job.name} 查看，卡住就 workhorse -k ${job.name} 后把 brief 缩小重派`
           await $.ui.toast(text)
           void $.prompt.submit({ text })
         }
         if (status.tests > Number(options.max_tests) && !job.warnedTests) {
           job.warnedTests = true
-          const text = `workhorse: job ${job.name} 已运行 ${status.tests} 次测试，超过 max_tests=${options.max_tests}；用 cx -t ${job.name} 查看，停止重复测试，必要时 cx -k ${job.name} 后缩小 brief 重派`
+          const text = `workhorse: job ${job.name} 已运行 ${status.tests} 次测试，超过 max_tests=${options.max_tests}；用 workhorse -t ${job.name} 查看，停止重复测试，必要时 workhorse -k ${job.name} 后缩小 brief 重派`
           await $.ui.toast(text)
           void $.prompt.submit({ text })
         }
@@ -95,7 +97,7 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     await $.tool.register({
-      name: 'cx',
+      name: 'run',
       description: '让 Codex 启动一个后台 job，一个 job 只做一个改动。调用后立即返回，报告会以 workhorse 消息的形式送达，不要轮询。根因不明时先用 mode=review，再用 resume + to_code 转成修复。brief 里不要写 baseline 或全量测试。',
       inputSchema: {
         type: 'object',
@@ -108,9 +110,8 @@ export const register: Register = (on, options) => {
         required: ['goal', 'context', 'done_when'],
       },
     })
-    await $.command.register({ name: 'cx', description: 'Open Codex jobs', immediate: true })
-    await $.command.register({ name: 'cx-jobs', description: 'List Codex jobs', immediate: true })
-    await $.command.register({ name: 'cx-kill', description: 'Kill a Codex job', argumentHint: '<name>', immediate: true })
+    await $.command.register({ name: 'workhorse-jobs', description: 'Open and list Codex jobs', immediate: true })
+    await $.command.register({ name: 'workhorse-kill', description: 'Kill a Codex job', argumentHint: '<name>', immediate: true })
     $.clock.every(30000, () => poll($, options))
     return next(e)
   })
@@ -129,7 +130,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane' }, ($, e, next) => {
-    if (e.requestId !== 'cx') return next(e)
+    if (e.requestId !== 'workhorse') return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     return Box({ flexDirection: 'column', children: [
       ...recentJobs.map(job => Button({ key: `select:${job.name}`, label: `${job.name === selectedJob ? '▸ ' : ''}${job.label}`, onPress: () => {} })),
@@ -143,7 +144,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
-    if (e.props.tool !== 'mcp__workhorse__cx') return next(e)
+    if (e.props.tool !== 'mcp__workhorse__run') return next(e)
     const { Text } = $.ui.resolve(e)
     return Text({ wrap: 'truncate-end', children: toolLine(e.props.input as Input) })
   })
@@ -166,16 +167,11 @@ export const register: Register = (on, options) => {
     return { element: e.element }
   })
 
-  on('command.run', { command: 'cx' }, async $ => {
-    await openPane($, options)
-    return {}
-  })
-
-  on('tool.check', { tool: 'mcp__workhorse__cx' }, ($, e) => (e.input as Input).mode === 'ops'
+  on('tool.check', { tool: 'mcp__workhorse__run' }, ($, e) => (e.input as Input).mode === 'ops'
     ? { decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' }
     : { decision: 'allow' })
 
-  on('tool.call', { tool: 'mcp__workhorse__cx' }, async ($, e) => {
+  on('tool.call', { tool: 'mcp__workhorse__run' }, async ($, e) => {
     const { tool, tool_use_id, agentId, ...args } = e
     const input = args as Input
     const deny = lint(input, String(options.banned_phrases))
@@ -190,12 +186,11 @@ export const register: Register = (on, options) => {
     return { result: `started ${job.name}; 报告会以 workhorse 消息送达，不要轮询。` }
   })
 
-  on('command.run', { command: 'cx-jobs' }, async $ => {
-    const result = await $.process.run([`${$.plugin.root}/bin/cx`, '-l'], { env: environment(options) })
-    return { text: result.stdout + result.stderr }
+  on('command.run', { command: 'workhorse-jobs' }, async $ => {
+    return { text: await openPane($, options) }
   })
-  on('command.run', { command: 'cx-kill' }, async ($, e) => {
-    const result = await $.process.run([`${$.plugin.root}/bin/cx`, '-k', e.args.trim()], { env: environment(options) })
+  on('command.run', { command: 'workhorse-kill' }, async ($, e) => {
+    const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-k', e.args.trim()], { env: environment(options) })
     return { text: result.stdout + result.stderr }
   })
 }

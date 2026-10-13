@@ -47,7 +47,7 @@ export function statusLine(status: Status): string {
 }
 
 export function toolLine(input: Input): string {
-  return `cx ▸ ${input.name || input.resume || 'auto'} · ${input.mode ?? 'code'} · ${input.effort ?? 'default'} — ${Array.from(input.goal).slice(0, 80).join('').replace(/\s+/g, ' ')}`
+  return `workhorse ▸ ${input.name || input.resume || 'auto'} · ${input.mode ?? 'code'} · ${input.effort ?? 'default'} — ${Array.from(input.goal).slice(0, 80).join('').replace(/\s+/g, ' ')}`
 }
 
 export function lint(input: Input, banned: string): string | undefined {
@@ -64,7 +64,7 @@ export function brief(input: Input): string {
 }
 
 export function argv(root: string, input: Input, cwd: string): string[] {
-  const args = [`${root}/bin/cx`, '--detach']
+  const args = [`${root}/bin/workhorse`, '--detach']
   if (input.resume) {
     args.push('-r', input.resume)
     if (input.to_code) args.push('--code')
@@ -81,9 +81,9 @@ export function argv(root: string, input: Input, cwd: string): string[] {
 export function environment(options: PluginOptions): Record<string, string> {
   const env: Record<string, string> = {}
   for (const key of ['model_code', 'model_review', 'model_ops', 'effort_code', 'effort_review', 'effort_ops', 'fast_match', 'disable_mcp', 'lang']) {
-    if (options[key] !== '') env[`CX_${key.toUpperCase()}`] = String(options[key])
+    if (options[key] !== '') env[`WORKHORSE_${key.toUpperCase()}`] = String(options[key])
   }
-  env.CX_ALLOW_OPS = options.allow_ops ? '1' : '0'
+  env.WORKHORSE_ALLOW_OPS = options.allow_ops ? '1' : '0'
   return env
 }
 

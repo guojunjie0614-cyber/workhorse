@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# cx: hand a task to Codex like a subagent. The task text comes on stdin; the short report goes to stdout.
-#   cx [-C dir | -w name] [-n name] [--code|--review|--ops] [-m model] [-e effort] [--detach] <<'EOF' ... EOF   new job
-#   cx -r [name] [--code] [--detach] <<'EOF' ... EOF    follow-up in the same Codex thread (default: last job; --code turns a review into a fix)
-#   cx -l | cx -t [name] | cx -k [name]      list jobs | what a job is doing | stop a job
-#   cx --clean name                          remove the worktree and branch that `-w name` created
+# workhorse: hand a task to Codex like a subagent. The task text comes on stdin; the short report goes to stdout.
+#   workhorse [-C dir | -w name] [-n name] [--code|--review|--ops] [-m model] [-e effort] [--detach] <<'EOF' ... EOF   new job
+#   workhorse -r [name] [--code] [--detach] <<'EOF' ... EOF    follow-up in the same Codex thread (default: last job; --code turns a review into a fix)
+#   workhorse -l | workhorse -t [name] | workhorse -k [name]      list jobs | what a job is doing | stop a job
+#   workhorse --clean name                          remove the worktree and branch that `-w name` created
 set -uo pipefail
 
-root="${CX_HOME:-$HOME/.cache/cx}"
+root="${WORKHORSE_HOME:-$HOME/.cache/workhorse}"
 mkdir -p "$root"
 find "$root" -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} + 2>/dev/null
 dir="$PWD" name="" mode="" resume=0 model="" effort="" dir_set=0 wt="" detach=0
@@ -93,24 +93,24 @@ case "${1:-}" in
     alive "$j" || { echo "not running"; exit 0; }
     kill -TERM $(tree "$(cat "$j/pid")") 2>/dev/null; echo "stopped $(basename "$j")"; exit 0 ;;
   --clean)
-    j="$root/${2:?usage: cx --clean name}"; w="$(cat "$j/worktree.txt" 2>/dev/null)"
-    [[ -n "$w" ]] || { echo "cx: job '$2' has no worktree" >&2; exit 2; }
+    j="$root/${2:?usage: workhorse --clean name}"; w="$(cat "$j/worktree.txt" 2>/dev/null)"
+    [[ -n "$w" ]] || { echo "workhorse: job '$2' has no worktree" >&2; exit 2; }
     main="$(cat "$j/repo.txt")"
-    git -C "$main" worktree remove "$w" && git -C "$main" branch -d "cx/$2"; exit $? ;;
+    git -C "$main" worktree remove "$w" && git -C "$main" branch -d "workhorse/$2"; exit $? ;;
 esac
 
 config_file="${XDG_CONFIG_HOME:-$HOME/.config}/workhorse/config"
 if [[ -f "$config_file" ]]; then
   while IFS='=' read -r key value || [[ -n "$key" ]]; do
     case "$key" in
-      CX_MODEL_CODE|CX_MODEL_REVIEW|CX_MODEL_OPS|CX_EFFORT_CODE|CX_EFFORT_REVIEW|CX_EFFORT_OPS|CX_FAST_MATCH|CX_DISABLE_MCP|CX_LANG|CX_ALLOW_OPS)
+      WORKHORSE_MODEL_CODE|WORKHORSE_MODEL_REVIEW|WORKHORSE_MODEL_OPS|WORKHORSE_EFFORT_CODE|WORKHORSE_EFFORT_REVIEW|WORKHORSE_EFFORT_OPS|WORKHORSE_FAST_MATCH|WORKHORSE_DISABLE_MCP|WORKHORSE_LANG|WORKHORSE_ALLOW_OPS)
         [[ ${!key+x} ]] || printf -v "$key" '%s' "$value" ;;
     esac
   done < "$config_file"
 fi
-: "${CX_MODEL_CODE=gpt-6-astra}" "${CX_MODEL_REVIEW=gpt-6-astra}" "${CX_MODEL_OPS=gpt-6.1-sol}"
-: "${CX_EFFORT_CODE=medium}" "${CX_EFFORT_REVIEW=high}" "${CX_EFFORT_OPS=high}"
-: "${CX_FAST_MATCH=*sol*}" "${CX_DISABLE_MCP=node_repl}" "${CX_LANG=zh}" "${CX_ALLOW_OPS=1}"
+: "${WORKHORSE_MODEL_CODE=gpt-6-astra}" "${WORKHORSE_MODEL_REVIEW=gpt-6-astra}" "${WORKHORSE_MODEL_OPS=gpt-6.1-sol}"
+: "${WORKHORSE_EFFORT_CODE=medium}" "${WORKHORSE_EFFORT_REVIEW=high}" "${WORKHORSE_EFFORT_OPS=high}"
+: "${WORKHORSE_FAST_MATCH=*sol*}" "${WORKHORSE_DISABLE_MCP=node_repl}" "${WORKHORSE_LANG=zh}" "${WORKHORSE_ALLOW_OPS=1}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -128,16 +128,16 @@ done
 
 (( detach )) && root="$(cd "$root" && pwd)"
 task="$(cat)"
-[[ -n "${task// }" ]] || { echo "cx: task text goes on stdin" >&2; exit 2; }
+[[ -n "${task// }" ]] || { echo "workhorse: task text goes on stdin" >&2; exit 2; }
 
 session="" prev_mode=""
 if (( resume )); then
   name="${name:-$(cat "$root/LAST" 2>/dev/null)}"; prev="$root/$name"
   for j in "$prev" "$prev".*; do
-    [[ -d "$j" ]] && alive "$j" && { echo "cx: $(basename "$j") is still running; wait for it or cx -k it first" >&2; exit 2; }
+    [[ -d "$j" ]] && alive "$j" && { echo "workhorse: $(basename "$j") is still running; wait for it or workhorse -k it first" >&2; exit 2; }
   done
   session="$(cat "$prev/session.txt" 2>/dev/null)"
-  [[ -n "$session" ]] || { echo "cx: no session for job '$name'" >&2; exit 2; }
+  [[ -n "$session" ]] || { echo "workhorse: no session for job '$name'" >&2; exit 2; }
   last_run="$(ls -dt "$prev" "$prev".* 2>/dev/null | head -1)"
   prev_mode="$(cat "$last_run/mode.txt")"
   (( dir_set )) || dir="$(cat "$prev/dir.txt")"
@@ -150,16 +150,16 @@ else
     top="$(git -C "$dir" rev-parse --show-toplevel)" || exit 2
     main="$(dirname "$(git -C "$top" rev-parse --path-format=absolute --git-common-dir)")"
     dir="$(dirname "$main")/$(basename "$main")-$wt"
-    [[ -d "$dir" ]] || git -C "$top" worktree add -q "$dir" -b "cx/$wt" || exit 2
+    [[ -d "$dir" ]] || git -C "$top" worktree add -q "$dir" -b "workhorse/$wt" || exit 2
     name="${name:-$wt}"
   fi
   dir="$(cd "$dir" && pwd)" || exit 2
   name="${name:-$(basename "$dir")-$(date +%m%d-%H%M%S)}"
   out="$root/$name"
-  [[ -e "$out" ]] && { echo "cx: job '$name' already exists; pick another -n or use -r" >&2; exit 2; }
+  [[ -e "$out" ]] && { echo "workhorse: job '$name' already exists; pick another -n or use -r" >&2; exit 2; }
 fi
 : "${mode:=code}"
-[[ "$mode" == ops && "$CX_ALLOW_OPS" == 0 ]] && { echo "cx: --ops is disabled by CX_ALLOW_OPS=0" >&2; exit 2; }
+[[ "$mode" == ops && "$WORKHORSE_ALLOW_OPS" == 0 ]] && { echo "workhorse: --ops is disabled by WORKHORSE_ALLOW_OPS=0" >&2; exit 2; }
 mkdir -p "$out"
 echo "$name" > "$root/LAST"
 printf '%s\n' "$dir" > "$out/dir.txt"; printf '%s\n' "$mode" > "$out/mode.txt"
@@ -167,18 +167,18 @@ printf '%s\n' "$dir" > "$out/dir.txt"; printf '%s\n' "$mode" > "$out/mode.txt"
 isgit=0; git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 && { isgit=1; pre="$(snap "$dir")"; }
 
 case "$mode" in
-  code)   sandbox=workspace-write;    : "${model:=$CX_MODEL_CODE}"; deff="$CX_EFFORT_CODE" ;;
-  review) sandbox=read-only;          : "${model:=$CX_MODEL_REVIEW}"; deff="$CX_EFFORT_REVIEW" ;;
-  ops)    sandbox=danger-full-access; : "${model:=$CX_MODEL_OPS}"; deff="$CX_EFFORT_OPS" ;;
+  code)   sandbox=workspace-write;    : "${model:=$WORKHORSE_MODEL_CODE}"; deff="$WORKHORSE_EFFORT_CODE" ;;
+  review) sandbox=read-only;          : "${model:=$WORKHORSE_MODEL_REVIEW}"; deff="$WORKHORSE_EFFORT_REVIEW" ;;
+  ops)    sandbox=danger-full-access; : "${model:=$WORKHORSE_MODEL_OPS}"; deff="$WORKHORSE_EFFORT_OPS" ;;
   *) echo "mode must be code|review|ops" >&2; exit 2 ;;
 esac
 # Matching models use the Fast tier with high default reasoning.
 tier=default
-[[ $model == $CX_FAST_MATCH ]] && { tier=fast; deff=high; }
+[[ $model == $WORKHORSE_FAST_MATCH ]] && { tier=fast; deff=high; }
 : "${effort:=$deff}"
 printf '%s\n' "$model" > "$out/model.txt"; printf '%s\n' "$effort" > "$out/effort.txt"
 
-if [[ "$CX_LANG" == en ]]; then
+if [[ "$WORKHORSE_LANG" == en ]]; then
   case "$mode" in
     code) scope="You may modify files within $dir." ;;
     review) scope="Read-only: do not modify any files; provide only conclusions and evidence." ;;
@@ -209,7 +209,7 @@ script_dir="$(cd "$(dirname "$script_path")" && pwd)"
   if [[ "$mode" == "$prev_mode" ]]; then
     printf '\n%s\n' "$follow_up"
   else
-    blocks="$(< "$script_dir/../prompts/blocks.$CX_LANG.md")"
+    blocks="$(< "$script_dir/../prompts/blocks.$WORKHORSE_LANG.md")"
     blocks="${blocks//\{\{SCOPE\}\}/$scope}"
     blocks="${blocks//\{\{OUT\}\}/$out}"
     printf '\n%s\n' "$blocks"
@@ -218,7 +218,7 @@ script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 
 cfg=(-c "model=\"$model\"" -c "model_reasoning_effort=\"$effort\"" -c "service_tier=\"$tier\"" -c "sandbox_mode=\"$sandbox\""
      -c "notify=[]")
-read -r -a disabled_mcp <<< "$CX_DISABLE_MCP"
+read -r -a disabled_mcp <<< "$WORKHORSE_DISABLE_MCP"
 for mcp in ${disabled_mcp[@]+"${disabled_mcp[@]}"}; do cfg+=(-c "mcp_servers.$mcp.enabled=false"); done
 [[ $sandbox == workspace-write ]] && cfg+=(-c "sandbox_workspace_write.network_access=true"
                                           -c "sandbox_workspace_write.writable_roots=[\"$out\"]")
@@ -249,7 +249,7 @@ printf '%s\n' "${sid:-$session}" > "$out/session.txt"
     post="$(snap "$dir")"
     if [[ "$pre" == "$post" ]]; then echo "(no file changes)"
     else git -C "$dir" diff --stat "$pre" "$post" | tail -n 15; fi
-    [[ -n "$wt" ]] && echo "worktree: $dir (branch cx/$wt)"
+    [[ -n "$wt" ]] && echo "worktree: $dir (branch workhorse/$wt)"
   fi
 } | if (( detach )); then cat > "$out/report.tmp"; else tee "$out/report.tmp"; fi
 mv "$out/report.tmp" "$out/report.txt"
@@ -268,7 +268,7 @@ if (( detach )); then
   deadline=$((SECONDS + 5))
   while [[ ! -f "$out/pid" && ! -f "$out/report.txt" ]]; do
     if (( SECONDS >= deadline )); then
-      echo "cx: detached job failed to start" >&2
+      echo "workhorse: detached job failed to start" >&2
       [[ -f "$out/codex.log" ]] && tail -n 10 "$out/codex.log" >&2
       exit 1
     fi
