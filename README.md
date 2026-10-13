@@ -4,7 +4,7 @@ A Claude Code mod that hands coding, review and ops work to Codex the way Claude
 
 ## What it adds
 
-- **`mcp__workhorse__run` tool.** The brief is structured (`goal`, `context`, `constraints`, `done_when`), plus `mode` (`code`, `review`, `ops`), `dir` or `worktree`, `name`, `resume` and `to_code`, `effort`, `model`. The call returns at once.
+- **`mcp__workhorse__run` tool.** The brief is structured (`goal`, `context` and `done_when` required, `constraints` optional), plus `mode` (`code`, `review`, `ops`), `dir` or `worktree`, `name`, `resume` and `to_code`, `effort` (`low`, `medium`, `high`), `model`. The call returns at once.
 - **Brief lint.** A brief without `done_when`, or one whose goal, constraints or acceptance asks for baselines or full suites, is refused before Codex starts.
 - **Permissions.** `code` and `review` jobs run without a prompt; `ops` jobs, which run Codex with full access, ask first. `allow_ops: false` turns them off.
 - **Watchdog.** Every 30 s the mod reads job status. A finished job's report is sent to Claude with a review reminder. A job with no output for `stall_minutes`, or more than `max_tests` test commands, is flagged once.
