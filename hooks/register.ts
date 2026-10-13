@@ -219,9 +219,17 @@ export const register: Register = (on, options) => {
     return { element: e.element }
   })
 
-  on('tool.check', { tool: 'mcp__workhorse__run' }, ($, e) => (e.input as Input).mode === 'ops'
-    ? { decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' }
-    : { decision: 'allow' })
+  on('tool.check', { tool: 'mcp__workhorse__run' }, async ($, e) => {
+    const input = e.input as Input
+    let ops = input.mode === 'ops'
+    if (!ops && input.resume && !input.mode && !input.to_code) {
+      const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-s', input.resume], { env: environment(options) })
+      ops = result.exitCode === 0 && (JSON.parse(result.stdout) as Status[])[0]?.mode === 'ops'
+    }
+    return ops
+      ? { decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' }
+      : { decision: 'allow' }
+  })
 
   on('tool.call', { tool: 'mcp__workhorse__run' }, async ($, e) => {
     const { tool, tool_use_id, agentId, ...args } = e

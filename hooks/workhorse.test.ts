@@ -144,6 +144,15 @@ test('launch writes argv, stdin and job; completion delivers report and acceptan
   expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { mode: 'ops' } })).toEqual({ decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' })
 })
 
+test('resuming an ops job asks first unless it becomes a code job', async ($, on) => {
+  setup(on)
+  on('process.run', ($, e) => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify([{ name: e.argv[2], mode: e.argv[2] === 'deploy' ? 'ops' : 'code' }]) } }))
+  const ask = { decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' }
+  expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { resume: 'deploy' } })).toEqual(ask)
+  expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { resume: 'deploy', to_code: true } })).toEqual({ decision: 'allow' })
+  expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { resume: 'patch' } })).toEqual({ decision: 'allow' })
+})
+
 test('stall and excess-test warnings each notify only once', async ($, on) => {
   const { clock } = setup(on)
   const messages: string[] = []
