@@ -1,50 +1,16 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
-import { argv, brief, environment, FRAME_MS, jobRows, MS_PER_DAY, lint, messages, MS_PER_MINUTE, MS_PER_SECOND, panelLines, started, toolLine } from './lib'
+import { argv, brief, environment, FRAME_MS, lint, messages, MS_PER_MINUTE, MS_PER_SECOND, panelLines, started, toolLine } from './lib'
 import type { Input, Job, PanelTask, Status } from './lib'
 
-async function refreshPane($: EngineInterface, options: PluginOptions) {
-  const session = await $.session.id()
-  const state = sessionState(session)
-  const list = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-l'], { env: environment(options) })
-  const prefix = `unread:${session}:`
-  const unread = (await $.store.keys()).filter(key => key.startsWith(prefix)).map(key => key.slice(prefix.length))
-  state.recentJobs = jobRows(list.stdout, unread)
-  if (!state.selectedJob && state.recentJobs.length) state.selectedJob = state.recentJobs[0]!.name
-  state.jobOutput = list.stderr
-  if (state.selectedJob) {
-    const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-s', state.selectedJob], { env: environment(options) })
-    const [status] = JSON.parse(result.stdout) as Status[]
-    if (status!.state === 'done') {
-      state.jobOutput = await $.fs.read(`${status!.path}/report.txt`)
-    } else {
-      const log = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-t', state.selectedJob], { env: environment(options) })
-      state.jobOutput = log.stdout + log.stderr
-    }
-  }
-  $.ui.invalidate('ui.render')
-  return state.recentJobs.map(job => job.label).join('\n') + list.stderr
-}
-
-async function openPane($: EngineInterface, options: PluginOptions, name: string) {
-  if (name) {
-    const session = await $.session.id()
-    sessionState(session).selectedJob = name
-    await $.store.delete(`unread:${session}:${name}`)
-  }
-  const text = await refreshPane($, options)
-  await $.ui.open({ id: 'workhorse', title: 'workhorse', focus: true })
-  return text
-}
-
 // One module instance can serve several sessions, so all UI state is per session.
-type SessionState = { statuses: PanelTask[]; ticking?: { cancel: () => void }; polling: boolean; pollAgain: boolean; seen: Map<string, string>; recentJobs: { name: string; label: string }[]; selectedJob: string; jobOutput: string }
+type SessionState = { statuses: PanelTask[]; ticking?: { cancel: () => void }; polling: boolean; pollAgain: boolean; seen: Map<string, string> }
 const sessions = new Map<string, SessionState>()
 
 function sessionState(id: string, reset = false): SessionState {
   let state = sessions.get(id)
   if (reset) state?.ticking?.cancel()
   if (!state || reset) {
-    state = { statuses: [], polling: false, pollAgain: false, seen: new Map(), recentJobs: [], selectedJob: '', jobOutput: '' }
+    state = { statuses: [], polling: false, pollAgain: false, seen: new Map() }
     sessions.set(id, state)
   }
   return state
@@ -155,7 +121,6 @@ async function poll($: EngineInterface, options: PluginOptions, state: SessionSt
               : copy.codeReminder(job.doneWhen, status.base)
         if (!await $.store.get(key)) continue
         await $.prompt.submit({ text: copy.finished(job.name, report, reminder) })
-        await $.store.set(`unread:${session}:${job.name}`, now)
         await $.store.delete(key)
       } else if (status.state === 'running') {
         if (status.repeat >= Number(options.repeat_limit) && !job.warnedRepeat?.includes(status.repeat_cmd)) {
@@ -200,11 +165,6 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     sessionState(await $.session.id(), true)
-    // Unread marks are written per session and outlive it; drop them with the job history.
-    const now = await $.clock.now()
-    for (const key of await $.store.keys()) {
-      if (key.startsWith('unread:') && !(now - Number(await $.store.get(key)) < Number(options.keep_days) * MS_PER_DAY)) await $.store.delete(key)
-    }
     await $.tool.register({
       name: 'run',
       description: copy.runDescription,
@@ -219,7 +179,6 @@ export const register: Register = (on, options) => {
         required: ['goal', 'context', 'done_when'],
       },
     })
-    await $.command.register({ name: 'workhorse-jobs', description: copy.jobsDescription, argumentHint: copy.jobsArgumentHint, immediate: true })
     await $.command.register({ name: 'workhorse-kill', description: copy.killDescription, argumentHint: copy.killArgumentHint, immediate: true })
     $.clock.every(Number(options.poll_seconds) * MS_PER_SECOND, () => pollOnce($, options))
     return next(e)
@@ -233,39 +192,10 @@ export const register: Register = (on, options) => {
     return Box({ flexDirection: 'column', children: lines.map(line => Text({ wrap: 'truncate-end', children: line.map(segment => Text({ color: 'text', ...segment })) })) })
   })
 
-  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
-    if (e.requestId !== 'workhorse') return next(e)
-    const { recentJobs, selectedJob, jobOutput } = sessionState(await $.session.id())
-    const { Box, Text, Button } = $.ui.resolve(e)
-    return Box({ flexDirection: 'column', children: [
-      ...recentJobs.map(job => Button({ key: `select:${job.name}`, label: `${job.name === selectedJob ? '▸ ' : ''}${job.label}`, onPress: () => {} })),
-      Box({ flexDirection: 'row', gap: 1, children: [
-        Button({ key: 'refresh', label: copy.refresh, onPress: () => {} }),
-      ] }),
-      Text({ color: 'text', bold: true, children: selectedJob }),
-      Text({ color: 'text', children: jobOutput }),
-    ] })
-  })
-
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
     if (e.props.tool !== 'mcp__workhorse__run') return next(e)
     const { Text } = $.ui.resolve(e)
     return Text({ color: 'text', wrap: 'truncate-end', children: toolLine(e.props.input as Input, String(options.lang)) })
-  })
-
-  on('ui.press', { plugin: 'workhorse' }, async ($, e, next) => {
-    if (e.element.startsWith('select:')) {
-      const session = await $.session.id()
-      const name = e.element.slice('select:'.length)
-      sessionState(session).selectedJob = name
-      await $.store.delete(`unread:${session}:${name}`)
-      await refreshPane($, options)
-    } else if (e.element === 'refresh') {
-      await refreshPane($, options)
-    } else {
-      return next(e)
-    }
-    return { element: e.element }
   })
 
   on('tool.check', { tool: 'mcp__workhorse__run' }, async ($, e) => {
@@ -301,9 +231,6 @@ export const register: Register = (on, options) => {
     return { result: [copy.launched(job.name), ...warnings].join('\n') }
   })
 
-  on('command.run', { command: 'workhorse-jobs' }, async ($, e) => {
-    return { text: await openPane($, options, e.args.trim()) }
-  })
   on('command.run', { command: 'workhorse-kill' }, async ($, e) => {
     let name = e.args.trim()
     if (!name) {

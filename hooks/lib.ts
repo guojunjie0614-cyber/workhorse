@@ -9,8 +9,6 @@ export const MS_PER_SECOND = 1000
 export const SECONDS_PER_MINUTE = 60
 export const MINUTES_PER_HOUR = 60
 export const MS_PER_MINUTE = MS_PER_SECOND * SECONDS_PER_MINUTE
-export const HOURS_PER_DAY = 24
-export const MS_PER_DAY = MS_PER_MINUTE * MINUTES_PER_HOUR * HOURS_PER_DAY
 export const TIME_DIGITS = 2
 export const NEGATION_WINDOW = 5
 export const NEGATIONS = ['不', '没', '无', '别', '勿', '禁止', '\\bno\\b', '\\bnot\\b', "\\bdon't\\b", '\\bwithout\\b', '\\bavoid\\b', '\\bskip\\b']
@@ -42,11 +40,8 @@ export const MESSAGES = {
     statusError: (name: string, error: string) => `workhorse: job ${name} 状态处理失败：${error}`,
     runDescription: '让 Codex 启动一个后台 job，一个 job 只做一个改动。调用后立即返回，报告会以 workhorse 消息的形式送达，不要轮询。根因不明时先用 mode=review，再用 resume + to_code 转成修复。brief 里不要写 baseline 或全量测试。',
     effortDescription: '推理强度字符串；常用值为 low、medium、high。',
-    jobsDescription: '打开并列出 Codex 任务',
-    jobsArgumentHint: '[任务名]',
     killDescription: '终止一个 Codex 任务',
     killArgumentHint: '<任务名>',
-    refresh: '刷新',
     opsPermission: 'ops 任务让 Codex 在仓库外以完整权限运行',
     launched: (name: string) => `已启动 ${name}；报告会以 workhorse 消息送达，不要轮询。`,
     noRunning: '本会话没有运行中的 workhorse 任务。',
@@ -74,11 +69,8 @@ export const MESSAGES = {
     statusError: (name: string, error: string) => `workhorse: job ${name} status handling failed: ${error}`,
     runDescription: 'Start a background Codex job for a single change. Returns immediately; the report arrives as a workhorse message. Do not poll. If the root cause is unknown, use mode=review first, then resume + to_code for fixes. Do not request baselines or full test suites in the brief.',
     effortDescription: 'Reasoning effort string; common values are low, medium and high.',
-    jobsDescription: 'Open and list Codex jobs',
-    jobsArgumentHint: '[name]',
     killDescription: 'Kill a Codex job',
     killArgumentHint: '<name>',
-    refresh: 'Refresh',
     opsPermission: 'ops job runs Codex with full access outside the repo',
     launched: (name: string) => `started ${name}; the report will arrive as a workhorse message. Do not poll.`,
     noRunning: 'No running workhorse jobs in this session.',
@@ -145,13 +137,6 @@ export type Status = {
   repeat_cmd: string
   family_tokens: number
   report: string
-}
-
-export function jobRows(output: string, unread: string[]): { name: string; label: string }[] {
-  return output.split('\n').filter(line => line.trim()).map(line => {
-    const name = line.trim().split(/\s+/)[0]!
-    return { name, label: `${unread.includes(name) ? '● ' : ''}${line.trim()}` }
-  })
 }
 
 export type PanelTask = Status & { goal: string; completedAt?: number }

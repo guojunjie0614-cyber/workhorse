@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { argv, brief, lint, MESSAGES, MS_PER_DAY, panelLines } from './lib'
+import { argv, brief, lint, MESSAGES, panelLines } from './lib'
 import type { PanelTask } from './lib'
 
 test('hides codex-rescue and passes other agents through', async ($, on) => {
@@ -172,7 +172,7 @@ test('launch writes argv, stdin and job; completion delivers report and acceptan
   expect(messages).toHaveLength(1)
   expect(messages[0]).toContain('workhorse: job patch finished\nFixed \nTruncated; full report: /jobs/patch/report.txt')
   expect(messages[0]).toContain(input.done_when)
-  expect(store).toEqual({ 'unread:session-1:patch': expect.any(Number) })
+  expect(store).toEqual({})
   expect(brief({ goal: 'fix', context: 'baseline.ts', done_when: 'unit test' })).toBe('Goal: fix\nContext: baseline.ts\nDone when: unit test')
   expect(await $.tool.check({ tool: 'mcp__workhorse__run', input: { mode: 'ops' } })).toEqual({ decision: 'ask', reason: 'ops job runs Codex with full access outside the repo' })
 })
@@ -266,7 +266,7 @@ test('failed completion submissions keep records until the next successful poll'
   fail = false
   await clock.advance(30000)
   expect(messages).toHaveLength(3)
-  expect(store).toEqual({ 'unread:session-1:done': expect.any(Number), 'unread:session-1:dead': expect.any(Number) })
+  expect(store).toEqual({})
 })
 
 test('missing jobs are removed and a failed job does not block other jobs', async ($, on) => {
@@ -291,7 +291,7 @@ test('missing jobs are removed and a failed job does not block other jobs', asyn
   expect(messages).toHaveLength(2)
   expect(messages[0]).toContain('job lost 记录已丢失')
   expect(messages[1]).toContain('Ready report')
-  expect(Object.keys(store)).toEqual(['job:/jobs/broken', 'unread:session-1:ready'])
+  expect(Object.keys(store)).toEqual(['job:/jobs/broken'])
   expect(toasts).toHaveLength(1)
   expect(toasts[0]).toContain('broken')
 })
@@ -316,7 +316,7 @@ test('two polls sharing a store submit a done review job only once', async ($, o
   expect(messages).toHaveLength(1)
   expect(messages[0]).toContain('核对结论和证据；要修复就用 resume review + to_code 交回')
   expect(messages[0]).not.toContain('自己运行')
-  expect(Object.keys(store)).toEqual(['job:/jobs/other', 'unread:session-1:review.2'])
+  expect(Object.keys(store)).toEqual(['job:/jobs/other'])
 })
 
 test('panel shows failed exits, family rounds and busy commands', () => {
@@ -435,39 +435,5 @@ test('cancelled jobs use inactive state and cancellation reminders instead of fa
   expect(messages).toHaveLength(1)
   expect(messages[0]).toContain(MESSAGES.zh.cancelledReminder('cancel'))
   expect(messages[0]).not.toContain('自己运行')
-  expect(store).toEqual({ 'unread:session-1:cancel': expect.any(Number) })
-})
-
-test('jobs mark unread per session and clear on named open or pane selection', async ($, on) => {
-  const { clock, store, session } = setup(on)
-  for (const name of ['one', 'two']) store[`job:/jobs/${name}`] = { name, session: 'session-1', goal: 'fix', doneWhen: 'unit test' }
-  on('process.run', ($, e) => ({ value: { exitCode: 0, stderr: '', stdout: e.argv[1] === '-l' ? 'one done\ntwo done\n' : JSON.stringify(e.argv.slice(2).map(name => ({ name, path: `/jobs/${name}`, state: 'done', exit: name === 'two' ? 1 : 0 }))) } }))
-  on('fs.read', ($, e) => ({ value: `Report: ${e.path}` }))
-  on('prompt.submit', ($, e) => ({ text: e.text }))
-  on('ui.open', () => ({ value: undefined }))
-  await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  await clock.advance(30000)
-  expect(store).toEqual({ 'unread:session-1:one': expect.any(Number), 'unread:session-1:two': expect.any(Number) })
-  session.id = 'session-2'
-  expect((await $.command.run({ command: 'workhorse-jobs', args: '' })).text).not.toContain('●')
-  session.id = 'session-1'
-  expect((await $.command.run({ command: 'workhorse-jobs', args: '' })).text).toContain('● one done\n● two done')
-  expect((await $.command.run({ command: 'workhorse-jobs', args: ' two ' })).text).toContain('● one done\ntwo done')
-  const ui = await $.ui.mount({ plugin: 'workhorse', component: 'Pane', surface: 'terminal', requestId: 'workhorse', props: {} })
-  expect(await ui.find({ type: 'Text', text: 'Report: /jobs/two/report.txt' })).toBeDefined()
-  await $.ui.press({ plugin: 'workhorse', key: 'select:one', requestId: 'workhorse', surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: 'Report: /jobs/one/report.txt' })).toBeDefined()
   expect(store).toEqual({})
-  await ui.unmount()
-})
-
-test('session start drops unread marks older than keep_days', { options: { keep_days: 1 } }, async ($, on) => {
-  const { clock, store } = setup(on)
-  await clock.advance(2 * MS_PER_DAY)
-  const now = clock.now()
-  store['unread:old-session:stale'] = now - 2 * MS_PER_DAY
-  store['unread:old-session:fresh'] = now - 1000
-  store['job:/jobs/keep'] = { name: 'keep' }
-  await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
-  expect(Object.keys(store).sort()).toEqual(['job:/jobs/keep', 'unread:old-session:fresh'])
 })
