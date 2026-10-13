@@ -72,7 +72,7 @@ test('panel follows events live and disappears once every job is done', async ($
     hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {},
   } })
   expect(await ui.find({ type: 'Text', text: '2 agents · 1 running · 1 done' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '████' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '████' })).toBeUndefined()
   await clock.advance(250)
   activity = 'rg -n parse src'
   mtime = 2

@@ -59,7 +59,7 @@ export function panelLines(tasks: PanelTask[], now: number): Segment[][] {
   return [
     [{ children: `${star} Working…`, color: 'claude' }],
     [{ children: `${visible.length} agents · ${running} running · ${done} done${failed ? ` · ${failed} failed` : ''}`, dimColor: true }],
-    ...visible.flatMap((task, index) => taskLines(task, now, frame, star, index === visible.length - 1, Math.max(...visible.map(t => width(t.name))))),
+    ...visible.flatMap((task, index) => taskLines(task, now, star, index === visible.length - 1, Math.max(...visible.map(t => width(t.name))))),
   ]
 }
 
@@ -84,26 +84,18 @@ function pad(text: string, columns: number): string {
   return out + ' '.repeat(columns - width(out))
 }
 
-function taskLines(status: PanelTask, now: number, frame: number, star: string, last: boolean, nameWidth: number): Segment[][] {
+function taskLines(status: PanelTask, now: number, star: string, last: boolean, nameWidth: number): Segment[][] {
   const seconds = Math.floor((status.completedAt ?? now) / 1000 - status.started)
   const minutes = Math.floor(seconds / 60)
   const elapsed = seconds < 60 ? `${seconds}s`
     : minutes < 60 ? `${minutes}m${String(seconds % 60).padStart(2, '0')}s`
       : `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, '0')}m`
-  const running = status.state === 'running'
-  const offset = running ? 16 - Math.abs(frame % 32 - 16) : 0
   const failed = status.state === 'dead'
   return [
     [
       { children: last ? '└─ ' : '├─ ' },
       { children: status.state === 'running' ? star : failed ? '✗' : '✓', color: failed ? 'error' : status.state === 'done' ? 'success' : 'claude' },
       { children: ` ${pad(status.name, nameWidth)}  ${pad(status.goal, 24)}  ` },
-      ...(running ? [
-        { children: '░'.repeat(offset), color: 'inactive' as const },
-        { children: '████', color: 'claude' as const },
-        { children: '░'.repeat(16 - offset), color: 'inactive' as const },
-      ] : [{ children: ' '.repeat(20) }]),
-      { children: '  ' },
       { children: (failed ? 'failed' : status.state).padEnd(7), color: failed ? 'error' : 'claude' },
       { children: `  ${elapsed}` },
     ],
