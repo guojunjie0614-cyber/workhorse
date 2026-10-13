@@ -2,7 +2,6 @@ import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 import { argv, brief, environment, jobRows, lint, panelLines, started, toolLine } from './lib'
 import type { Input, Job, PanelTask, Status } from './lib'
 
-let statuses: PanelTask[] = []
 let recentJobs: { name: string; label: string }[] = []
 let selectedJob = ''
 let jobOutput = ''
@@ -32,32 +31,42 @@ async function openPane($: EngineInterface, options: PluginOptions) {
   return text
 }
 
-let ticking: { cancel: () => void } | undefined
-let polling = false
-const seenEvents = new Map<string, string>()
-let pollAgain = false
+// One module instance can serve several sessions, so all band state is per session.
+type SessionState = { statuses: PanelTask[]; ticking?: { cancel: () => void }; polling: boolean; pollAgain: boolean; seen: Map<string, string> }
+const sessions = new Map<string, SessionState>()
+
+function sessionState(id: string, reset = false): SessionState {
+  let state = sessions.get(id)
+  if (reset) state?.ticking?.cancel()
+  if (!state || reset) {
+    state = { statuses: [], polling: false, pollAgain: false, seen: new Map() }
+    sessions.set(id, state)
+  }
+  return state
+}
 
 async function pollOnce($: EngineInterface, options: PluginOptions) {
-  if (polling) {
-    pollAgain = true
+  const state = sessionState(await $.session.id())
+  if (state.polling) {
+    state.pollAgain = true
     return
   }
-  polling = true
+  state.polling = true
   try {
     do {
-      pollAgain = false
-      await poll($, options)
-    } while (pollAgain)
+      state.pollAgain = false
+      await poll($, options, state)
+    } while (state.pollAgain)
   } catch (error) {
-    ticking?.cancel()
-    ticking = undefined
+    state.ticking?.cancel()
+    state.ticking = undefined
     throw error
   } finally {
-    polling = false
+    state.polling = false
   }
 }
 
-async function poll($: EngineInterface, options: PluginOptions) {
+async function poll($: EngineInterface, options: PluginOptions, state: SessionState) {
   const session = await $.session.id()
   const now = await $.clock.now()
   const owned: [string, Job][] = []
@@ -67,9 +76,9 @@ async function poll($: EngineInterface, options: PluginOptions) {
     if (job?.session === session) owned.push([key, job])
   }
   if (!owned.length) {
-    statuses = statuses.filter(status => status.completedAt !== undefined && now - status.completedAt < 180000)
-    ticking?.cancel()
-    ticking = undefined
+    state.statuses = state.statuses.filter(status => status.completedAt !== undefined && now - status.completedAt < 180000)
+    state.ticking?.cancel()
+    state.ticking = undefined
     $.ui.invalidate('ui.render')
     return
   }
@@ -79,27 +88,27 @@ async function poll($: EngineInterface, options: PluginOptions) {
     ...status,
     goal: owned.find(([, job]) => job.name === status.name)![1].goal,
     completedAt: status.state === 'done' || status.state === 'dead'
-      ? statuses.find(previous => previous.name === status.name)?.completedAt ?? now
+      ? state.statuses.find(previous => previous.name === status.name)?.completedAt ?? now
       : undefined,
   }))
-  statuses = [
-    ...statuses.flatMap(previous => {
+  state.statuses = [
+    ...state.statuses.flatMap(previous => {
       const current = fresh.find(status => status.name === previous.name)
       if (current) return [current]
       return previous.completedAt !== undefined && now - previous.completedAt < 180000 ? [previous] : []
     }),
-    ...fresh.filter(status => !statuses.some(previous => previous.name === status.name)),
+    ...fresh.filter(status => !state.statuses.some(previous => previous.name === status.name)),
   ]
   $.ui.invalidate('ui.render')
   if (polled.some(status => status.state === 'running')) {
-    ticking ??= $.clock.every(250, async () => {
+    state.ticking ??= $.clock.every(250, async () => {
       $.ui.invalidate('ui.render')
-      for (const status of statuses) {
+      for (const status of state.statuses) {
         if (status.state !== 'running') continue
         const stat = await $.fs.stat(`${status.path}/events.jsonl`).catch(() => undefined)
         const mark = stat && `${stat.mtimeMs}:${stat.size}`
-        const changed = mark !== undefined && mark !== seenEvents.get(status.name)
-        if (mark) seenEvents.set(status.name, mark)
+        const changed = mark !== undefined && mark !== state.seen.get(status.name)
+        if (mark) state.seen.set(status.name, mark)
         if (changed || await $.fs.exists(`${status.path}/report.txt`)) {
           void pollOnce($, options)
           return
@@ -107,8 +116,8 @@ async function poll($: EngineInterface, options: PluginOptions) {
       }
     })
   } else {
-    ticking?.cancel()
-    ticking = undefined
+    state.ticking?.cancel()
+    state.ticking = undefined
   }
   for (const [key, job] of owned) {
     try {
@@ -155,11 +164,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.start', async ($, e, next) => {
-    ticking?.cancel()
-    ticking = undefined
-    seenEvents.clear()
-    polling = false
-    pollAgain = false
+    sessionState(await $.session.id(), true)
     await $.tool.register({
       name: 'run',
       description: '让 Codex 启动一个后台 job，一个 job 只做一个改动。调用后立即返回，报告会以 workhorse 消息的形式送达，不要轮询。根因不明时先用 mode=review，再用 resume + to_code 转成修复。brief 里不要写 baseline 或全量测试。',
@@ -182,7 +187,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const now = await $.clock.now()
-    const lines = panelLines(statuses, now)
+    const lines = panelLines(sessionState(await $.session.id()).statuses, now)
     if (!lines.length) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     return Box({ flexDirection: 'column', children: lines.map(line => Text({ children: line.map(segment => Text({ color: 'text', ...segment })) })) })

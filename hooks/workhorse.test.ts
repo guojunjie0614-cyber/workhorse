@@ -19,12 +19,13 @@ function setup(on: On) {
   on('store.keys', () => ({ value: Object.keys(store) }))
   on('store.delete', ($, e) => { delete store[e.key]; return { value: undefined } })
   const clock = mock.clock(on)
-  on('session.id', () => ({ value: 'session-1' }))
+  const session = { id: 'session-1' }
+  on('session.id', () => ({ value: session.id }))
   on('session.cwd', () => ({ value: '/repo' }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('tool.register', () => ({ value: { tool: 'mcp__workhorse__run' } }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
-  return { clock, store }
+  return { clock, store, session }
 }
 
 test('running band refreshes elapsed seconds without stop or logs buttons', async ($, on) => {
@@ -84,6 +85,25 @@ test('panel follows events live and disappears once every job is done', async ($
   expect(await ui.find({ type: 'Text', text: '2 agents · 1 running · 1 done' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: '2 agents · 0 running · 2 done' })).toBeUndefined()
   await ui.unmount()
+})
+
+test('a session sees only its own jobs in the band', async ($, on) => {
+  const { clock, store, session } = setup(on)
+  on('fs.exists', () => ({ value: false }))
+  on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: 1, isLink: false } }))
+  on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: '' }))
+  store['job:/jobs/mine'] = { name: 'mine', session: 'session-1', goal: 'fix parser', doneWhen: 'unit test', warnedStall: false, warnedTests: false }
+  on('process.run', () => ({ value: { exitCode: 0, stderr: '', stdout: JSON.stringify([{ name: 'mine', path: '/jobs/mine', state: 'running', mode: 'code', started: 0, cmds: 1, tests: 0, idle_min: 0, activity: 'x', files: 0 }]) } }))
+  await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
+  await clock.advance(30000)
+  const props = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} }
+  const mine = await $.ui.mount({ plugin: 'workhorse', component: 'AbovePrompt', surface: 'terminal', requestId: 'mine', props })
+  expect(await mine.find({ type: 'Text', text: '1 agents · 1 running · 0 done' })).toBeDefined()
+  await mine.unmount()
+  session.id = 'session-2'
+  const other = await $.ui.mount({ plugin: 'workhorse', component: 'AbovePrompt', surface: 'terminal', requestId: 'other', props })
+  expect(await other.find({ type: 'Text', text: '1 agents · 1 running · 0 done' })).toBeUndefined()
+  await other.unmount()
 })
 
 test('workhorse ToolUse draws the goal in a compact line', async ($, on) => {
