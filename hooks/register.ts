@@ -1,11 +1,14 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
-import { argv, brief, environment, FRAME_MS, jobRows, lint, messages, MS_PER_MINUTE, MS_PER_SECOND, panelLines, started, toolLine } from './lib'
+import { argv, brief, environment, FRAME_MS, jobRows, MS_PER_DAY, lint, messages, MS_PER_MINUTE, MS_PER_SECOND, panelLines, started, toolLine } from './lib'
 import type { Input, Job, PanelTask, Status } from './lib'
 
 async function refreshPane($: EngineInterface, options: PluginOptions) {
-  const state = sessionState(await $.session.id())
+  const session = await $.session.id()
+  const state = sessionState(session)
   const list = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-l'], { env: environment(options) })
-  state.recentJobs = jobRows(list.stdout)
+  const prefix = `unread:${session}:`
+  const unread = (await $.store.keys()).filter(key => key.startsWith(prefix)).map(key => key.slice(prefix.length))
+  state.recentJobs = jobRows(list.stdout, unread)
   if (!state.selectedJob && state.recentJobs.length) state.selectedJob = state.recentJobs[0]!.name
   state.jobOutput = list.stderr
   if (state.selectedJob) {
@@ -19,10 +22,15 @@ async function refreshPane($: EngineInterface, options: PluginOptions) {
     }
   }
   $.ui.invalidate('ui.render')
-  return list.stdout + list.stderr
+  return state.recentJobs.map(job => job.label).join('\n') + list.stderr
 }
 
-async function openPane($: EngineInterface, options: PluginOptions) {
+async function openPane($: EngineInterface, options: PluginOptions, name: string) {
+  if (name) {
+    const session = await $.session.id()
+    sessionState(session).selectedJob = name
+    await $.store.delete(`unread:${session}:${name}`)
+  }
   const text = await refreshPane($, options)
   await $.ui.open({ id: 'workhorse', title: 'workhorse', focus: true })
   return text
@@ -122,6 +130,13 @@ async function poll($: EngineInterface, options: PluginOptions, state: SessionSt
   for (const [key, job] of owned) {
     try {
       const status = polled.find(s => s.name === job.name)!
+      if (status.family_tokens >= Number(options.family_tokens_warn) && !job.warnedFamilyTokens) {
+        const text = copy.familyTokens(job.name, status.family_tokens)
+        await $.ui.toast(text)
+        await $.prompt.submit({ text })
+        job.warnedFamilyTokens = true
+        await $.store.set(key, job)
+      }
       if (status.state === 'missing') {
         if (!await $.store.get(key)) continue
         await $.prompt.submit({ text: copy.missing(job.name) })
@@ -129,7 +144,9 @@ async function poll($: EngineInterface, options: PluginOptions, state: SessionSt
       } else if (status.state === 'done' || status.state === 'dead') {
         const fullReport = status.state === 'done' ? await $.fs.read(`${status.path}/report.txt`) : ''
         const report = fullReport.slice(0, reportMaxChars) + (fullReport.length > reportMaxChars ? copy.truncated(status.path) : '')
-        const reminder = status.state === 'dead'
+        const reminder = status.cancelled
+          ? copy.cancelledReminder(job.name)
+          : status.state === 'dead'
           ? copy.deadReminder(job.name)
           : status.mode === 'review'
             ? copy.reviewReminder(status.base)
@@ -138,8 +155,16 @@ async function poll($: EngineInterface, options: PluginOptions, state: SessionSt
               : copy.codeReminder(job.doneWhen, status.base)
         if (!await $.store.get(key)) continue
         await $.prompt.submit({ text: copy.finished(job.name, report, reminder) })
+        await $.store.set(`unread:${session}:${job.name}`, now)
         await $.store.delete(key)
       } else if (status.state === 'running') {
+        if (status.repeat >= Number(options.repeat_limit) && !job.warnedRepeat?.includes(status.repeat_cmd)) {
+          const text = copy.repeated(job.name, status.repeat, status.repeat_cmd)
+          await $.ui.toast(text)
+          await $.prompt.submit({ text })
+          job.warnedRepeat = [...(job.warnedRepeat ?? []), status.repeat_cmd]
+          await $.store.set(key, job)
+        }
         if (status.busy && status.busy_min >= Number(options.command_minutes) && job.warnedBusy !== status.busy) {
           const text = copy.longCommand(job.name, status.busy_min, status.busy)
           await $.ui.toast(text)
@@ -175,6 +200,11 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     sessionState(await $.session.id(), true)
+    // Unread marks are written per session and outlive it; drop them with the job history.
+    const now = await $.clock.now()
+    for (const key of await $.store.keys()) {
+      if (key.startsWith('unread:') && !(now - Number(await $.store.get(key)) < Number(options.keep_days) * MS_PER_DAY)) await $.store.delete(key)
+    }
     await $.tool.register({
       name: 'run',
       description: copy.runDescription,
@@ -189,7 +219,7 @@ export const register: Register = (on, options) => {
         required: ['goal', 'context', 'done_when'],
       },
     })
-    await $.command.register({ name: 'workhorse-jobs', description: copy.jobsDescription, immediate: true })
+    await $.command.register({ name: 'workhorse-jobs', description: copy.jobsDescription, argumentHint: copy.jobsArgumentHint, immediate: true })
     await $.command.register({ name: 'workhorse-kill', description: copy.killDescription, argumentHint: copy.killArgumentHint, immediate: true })
     $.clock.every(Number(options.poll_seconds) * MS_PER_SECOND, () => pollOnce($, options))
     return next(e)
@@ -225,7 +255,10 @@ export const register: Register = (on, options) => {
 
   on('ui.press', { plugin: 'workhorse' }, async ($, e, next) => {
     if (e.element.startsWith('select:')) {
-      sessionState(await $.session.id()).selectedJob = e.element.slice('select:'.length)
+      const session = await $.session.id()
+      const name = e.element.slice('select:'.length)
+      sessionState(session).selectedJob = name
+      await $.store.delete(`unread:${session}:${name}`)
       await refreshPane($, options)
     } else if (e.element === 'refresh') {
       await refreshPane($, options)
@@ -268,8 +301,8 @@ export const register: Register = (on, options) => {
     return { result: [copy.launched(job.name), ...warnings].join('\n') }
   })
 
-  on('command.run', { command: 'workhorse-jobs' }, async $ => {
-    return { text: await openPane($, options) }
+  on('command.run', { command: 'workhorse-jobs' }, async ($, e) => {
+    return { text: await openPane($, options, e.args.trim()) }
   })
   on('command.run', { command: 'workhorse-kill' }, async ($, e) => {
     let name = e.args.trim()

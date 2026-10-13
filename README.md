@@ -45,6 +45,8 @@ Set them in `/plugin configure workhorse@workhorse`. Empty strings keep `workhor
 | `allow_ops` | `WORKHORSE_ALLOW_OPS` | `true` |
 | `stall_minutes`, `max_tests` | | `10`, `2` |
 | `command_minutes` | | `20` minutes before warning once per command text; never terminates the command |
+| `repeat_limit` | | `3` consecutive identical command + exit code results before warning once per command text; never terminates the job |
+| `family_tokens_warn` | | `1000000` cumulative family tokens before warning once per job |
 | `poll_seconds` | | `30` seconds between status polls |
 | `done_linger_minutes` | | `3` minutes to show finished jobs while others run |
 | `report_max_chars` | | `6000` report characters per completion notice |
