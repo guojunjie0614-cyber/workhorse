@@ -60,7 +60,7 @@ export function panelLines(tasks: PanelTask[], now: number, columns = 120): Segm
   const running = visible.filter(task => task.state === 'running').length
   const nameWidth = Math.max(...visible.map(task => width(taskName(task))))
   // Tree, star, gaps, state and elapsed take nameWidth + 25 cells; the goal gets the rest.
-  const goalWidth = Math.max(10, Math.min(Math.max(...visible.map(task => width(oneLine(task.goal)))), columns - nameWidth - 25))
+  const goalWidth = Math.max(10, Math.min(Math.max(...visible.map(task => width(headline(task.goal)))), 40, columns - nameWidth - 25))
   const done = visible.filter(task => task.state === 'done' && task.exit === 0).length
   const failed = visible.filter(task => task.state === 'dead' || (task.state === 'done' && task.exit !== 0)).length
   return [
@@ -80,6 +80,11 @@ function charWidth(char: string): number {
 
 function width(text: string): number {
   return Array.from(text).reduce((sum, char) => sum + charWidth(char), 0)
+}
+
+// The band shows a goal's first clause; the full goal stays in the brief and the report.
+function headline(text: string): string {
+  return oneLine(text).split(/\s*[：:（(。；;]/)[0]!.trim() || oneLine(text)
 }
 
 function oneLine(text: string): string {
@@ -115,7 +120,7 @@ function taskLines(status: PanelTask, now: number, star: string, last: boolean, 
     [
       { children: last ? '└─ ' : '├─ ' },
       { children: status.state === 'running' ? star : failed ? '✗' : '✓', color: failed ? 'error' : status.state === 'done' ? 'success' : 'claude' },
-      { children: ` ${pad(taskName(status), nameWidth)}  ${fit(status.goal, goalWidth)}  ` },
+      { children: ` ${pad(taskName(status), nameWidth)}  ${fit(headline(status.goal), goalWidth)}  ` },
       { children: (failed ? 'failed' : status.state).padEnd(7), color: failed ? 'error' : 'claude' },
       { children: `  ${elapsed}` },
     ],

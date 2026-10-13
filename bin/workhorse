@@ -52,7 +52,10 @@ case "${1:-}" in
     now=$(date +%s)
     for name in "$@"; do
       j="$(resolve "$name")"; name="${j##*/}"; base="$(base_of "$name")"
-      round=1; [[ "$name" == "$base".* ]] && round="${name##*.}"
+      # base.N is round N; a legacy chain like base.2.2.2 counts one round per segment.
+      round=1; rest="${name#"$base"}"
+      if [[ "$rest" =~ ^\.([0-9]+)$ ]]; then round="${BASH_REMATCH[1]}"
+      elif [[ "$rest" =~ ^(\.[0-9]+)+$ ]]; then round=$(( $(tr -cd . <<<"$rest" | wc -c) + 1 )); fi
       if [[ ! -d "$j" ]]; then
         jq -n --arg name "$name" --arg base "$base" --argjson round "$round" '{name: $name, base: $base, round: $round, state: "missing", activity: "", busy: "", busy_min: 0, files: 0}'
         continue
