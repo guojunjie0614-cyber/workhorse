@@ -1,8 +1,10 @@
 {
   "name": "workhorse",
   "version": "0.5.1",
-  "description": "Hand coding, review and ops jobs to Codex as background subagents, with a job board, stall watchdog and completion notices",
+  "description": "Hand coding, review and ops jobs to Codex as background subagents, with a live status band, watchdog warnings and completion notices",
   "author": { "name": "mac_max" },
+  "homepage": "https://github.com/guojunjie0614-cyber/workhorse",
+  "repository": "https://github.com/guojunjie0614-cyber/workhorse",
   "userConfig": {
     "hide_codex_rescue": { "type": "boolean", "title": "Hide Codex rescue agent", "default": true, "description": "Hide codex:codex-rescue from Claude to avoid competing with workhorse delegation" },
     "model_code": { "type": "string", "title": "Code model", "default": "", "description": "Code model" },

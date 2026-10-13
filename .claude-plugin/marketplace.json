@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "workhorse",
-      "description": "Hand coding, review and ops jobs to Codex as background subagents, with a job board, stall watchdog and completion notices",
+      "description": "Hand coding, review and ops jobs to Codex as background subagents, with a live status band, watchdog warnings and completion notices",
       "version": "0.5.1",
       "author": {
         "name": "mac_max"
