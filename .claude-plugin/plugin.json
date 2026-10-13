@@ -1,6 +1,6 @@
 {
   "name": "workhorse",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Hand coding, review and ops jobs to Codex as background subagents, with a job board, stall watchdog and completion notices",
   "author": { "name": "mac_max" },
   "userConfig": {
