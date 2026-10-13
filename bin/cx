@@ -23,17 +23,28 @@ case "${1:-}" in
     for d in $(ls -t "$root" | grep -v '^LAST$' | head -20); do
       j="$root/$d"
       if [[ -f "$j/report.txt" ]]; then st="$(head -1 "$j/report.txt" | cut -d' ' -f3-)"
-      elif alive "$j"; then st="running $(( ($(date +%s) - $(stat -f %B "$j/codex.log")) / 60 ))min"
+      elif alive "$j"; then
+        if [[ -f "$j/start" ]]; then started=$(cat "$j/start")
+        else started=$(perl -e 'print((stat shift)[9])' "$j/codex.log"); fi
+        st="running $(( ($(date +%s) - started) / 60 ))min"
       else st="dead (no report)"; fi
       printf '%-30s %s\n' "$d" "$st"
     done; exit 0 ;;
   -t)
     j="$root/${2:-$(newest)}"
-    grep -E '^/bin/zsh -lc' "$j/codex.log" | tail -n 8 | cut -c1-200
+    cmds=0 tests=0 log="$j/codex.log"
+    if [[ -f "$j/events.jsonl" ]]; then
+      log="$j/events.jsonl"
+      jq -r 'select(.type == "item.started" and .item.type == "command_execution") | .item.command' "$log" | tail -n 8 | cut -c1-200
+      cmds=$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$log")
+      tests=$(jq -s --arg tests "$TESTS" '[.[] | select(.type == "item.completed" and .item.type == "command_execution") | select(.item.command | test($tests))] | length' "$log")
+    fi
+    if [[ -f "$j/start" ]]; then started=$(cat "$j/start")
+    else started=$(perl -e 'print((stat shift)[9])' "$j/codex.log"); fi
     now=$(date +%s)
-    echo "-- $(grep -c '^exec$' "$j/codex.log") commands, $(grep -E '^/bin/zsh -lc' "$j/codex.log" | grep -cE "$TESTS") test runs," \
-         "$(( (now - $(stat -f %B "$j/codex.log")) / 60 ))min elapsed," \
-         "last output $(( (now - $(stat -f %m "$j/codex.log")) / 60 ))min ago$(alive "$j" || echo ', not running')"; exit 0 ;;
+    echo "-- $cmds commands, $tests test runs," \
+         "$(( (now - started) / 60 ))min elapsed," \
+         "last output $(( (now - $(perl -e 'print((stat shift)[9])' "$log")) / 60 ))min ago$(alive "$j" || echo ', not running')"; exit 0 ;;
   -k)
     j="$root/${2:-$(newest)}"
     alive "$j" || { echo "not running"; exit 0; }
@@ -153,22 +164,23 @@ cfg=(-c "model=\"$model\"" -c "model_reasoning_effort=\"$effort\"" -c "service_t
                                           -c "sandbox_workspace_write.writable_roots=[\"$out\"]")
 
 start=$(date +%s)
+printf '%s\n' "$start" > "$out/start"
 if [[ -n "$session" ]]; then
-  (cd "$dir" && exec codex exec resume "${cfg[@]}" --skip-git-repo-check -o "$out/final.md" "$session" - \
-     < "$out/prompt.md" > "$out/codex.log" 2>&1) &
+  (cd "$dir" && exec codex exec resume "${cfg[@]}" --json --skip-git-repo-check -o "$out/final.md" "$session" - \
+     < "$out/prompt.md" > "$out/events.jsonl" 2> "$out/codex.log") &
 else
-  codex exec "${cfg[@]}" -C "$dir" --skip-git-repo-check -o "$out/final.md" - < "$out/prompt.md" > "$out/codex.log" 2>&1 &
+  codex exec "${cfg[@]}" -C "$dir" --json --skip-git-repo-check -o "$out/final.md" - < "$out/prompt.md" > "$out/events.jsonl" 2> "$out/codex.log" &
 fi
 echo $! > "$out/pid"
 wait $!; rc=$?
 rm -f "$out/pid"
 
-sid="$(grep -m1 '^session id:' "$out/codex.log" | awk '{print $3}')"
+sid="$(jq -r 'select(.type == "thread.started") | .thread_id' "$out/events.jsonl")"
 printf '%s\n' "${sid:-$session}" > "$out/session.txt"
 {
   echo "== $(basename "$out") exit=$rc $mode $model/$effort/$tier $(( ($(date +%s) - start + 59) / 60 ))min" \
-       "tokens=$(grep -A1 '^tokens used' "$out/codex.log" | tail -1) cmds=$(grep -c '^exec$' "$out/codex.log")" \
-       "tests=$(grep -E '^/bin/zsh -lc' "$out/codex.log" | grep -cE "$TESTS")"
+       "tokens=$(jq -s 'map(select(.type == "turn.completed") | .usage.input_tokens + .usage.output_tokens) | add // 0' "$out/events.jsonl") cmds=$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$out/events.jsonl")" \
+       "tests=$(jq -s --arg tests "$TESTS" '[.[] | select(.type == "item.completed" and .item.type == "command_execution") | select(.item.command | test($tests))] | length' "$out/events.jsonl")"
   [[ -n "$session" && -n "$sid" && "$sid" != "$session" ]] && echo "!! resume started a new thread; context did not carry over"
   (( rc )) && tail -n 20 "$out/codex.log"
   cat "$out/final.md" 2>/dev/null; echo
