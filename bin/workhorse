@@ -8,8 +8,6 @@ set -uo pipefail
 
 # Maximum characters in status activity and command summaries.
 readonly SUMMARY_CHARS=60
-# Number of recent commands included in status JSON.
-readonly LAST_CMDS=5
 # Maximum jobs shown by the list command.
 readonly LIST_LIMIT=20
 # Name column width in list output.
@@ -71,14 +69,14 @@ config_file="${XDG_CONFIG_HOME:-$HOME/.config}/workhorse/config"
 if [[ -f "$config_file" ]]; then
   while IFS='=' read -r key value || [[ -n "$key" ]]; do
     case "$key" in
-      WORKHORSE_MODEL_CODE|WORKHORSE_MODEL_REVIEW|WORKHORSE_MODEL_OPS|WORKHORSE_EFFORT_CODE|WORKHORSE_EFFORT_REVIEW|WORKHORSE_EFFORT_OPS|WORKHORSE_FAST_MATCH|WORKHORSE_DISABLE_MCP|WORKHORSE_LANG|WORKHORSE_ALLOW_OPS|WORKHORSE_KEEP_DAYS|WORKHORSE_SKIP_SKILLS|WORKHORSE_TEST_PATTERN)
+      WORKHORSE_MODEL_CODE|WORKHORSE_MODEL_REVIEW|WORKHORSE_MODEL_OPS|WORKHORSE_EFFORT_CODE|WORKHORSE_EFFORT_REVIEW|WORKHORSE_EFFORT_OPS|WORKHORSE_FAST_MATCH|WORKHORSE_DISABLE_MCP|WORKHORSE_ALLOW_OPS|WORKHORSE_KEEP_DAYS|WORKHORSE_SKIP_SKILLS|WORKHORSE_TEST_PATTERN)
         [[ ${!key+x} ]] || printf -v "$key" '%s' "$value" ;;
     esac
   done < "$config_file"
 fi
 : "${WORKHORSE_MODEL_CODE=gpt-6-astra}" "${WORKHORSE_MODEL_REVIEW=gpt-6-astra}" "${WORKHORSE_MODEL_OPS=gpt-6.1-sol}"
 : "${WORKHORSE_EFFORT_CODE=medium}" "${WORKHORSE_EFFORT_REVIEW=high}" "${WORKHORSE_EFFORT_OPS=high}"
-: "${WORKHORSE_FAST_MATCH=*sol*}" "${WORKHORSE_DISABLE_MCP=node_repl}" "${WORKHORSE_LANG=zh}" "${WORKHORSE_ALLOW_OPS=1}"
+: "${WORKHORSE_FAST_MATCH=*sol*}" "${WORKHORSE_DISABLE_MCP=node_repl}" "${WORKHORSE_ALLOW_OPS=1}"
 : "${WORKHORSE_KEEP_DAYS=14}" "${WORKHORSE_SKIP_SKILLS=karpathy-guidelines,code-review,diagnosing-bugs,tdd}" "${WORKHORSE_TEST_PATTERN=$TESTS}"
 
 case "${1:-}" in
@@ -135,8 +133,8 @@ case "${1:-}" in
         --arg state "$state" --arg mode "$(cat "$j/mode.txt" 2>/dev/null)" \
         --arg model "$(cat "$j/model.txt" 2>/dev/null)" --arg effort "$(cat "$j/effort.txt" 2>/dev/null)" \
         --arg report "$report" --arg tests "$WORKHORSE_TEST_PATTERN" --argjson started "$started" \
-        --argjson summary_chars "$SUMMARY_CHARS" --argjson last_cmds "$LAST_CMDS" --argjson seconds_per_minute "$SECONDS_PER_MINUTE" \
-        --argjson elapsed "$(( (now - started) / SECONDS_PER_MINUTE ))" --argjson idle "$(( (now - modified) / SECONDS_PER_MINUTE ))" "$COMMAND_JQ"'
+        --argjson summary_chars "$SUMMARY_CHARS" --argjson seconds_per_minute "$SECONDS_PER_MINUTE" \
+        --argjson idle "$(( (now - modified) / SECONDS_PER_MINUTE ))" "$COMMAND_JQ"'
         [.[] | select(.type == "item.completed" and .item.type == "command_execution")] as $commands |
         (reduce (.[] | select(.type == "item.completed") | .item) as $item
           ({count: 0, command: "", exit_code: null};
@@ -156,14 +154,11 @@ case "${1:-}" in
                     elif .type == "agent_message" then (.text // "") else "" end | (split("\n")[0] // "") | .[:$summary_chars]),
          files: ([.[] | select(.type == "item.completed" and .item.type == "file_change") | .item.changes[].path] | unique | length),
          exit: (if $state == "done" then ($report | capture(" exit=(?<code>-?[0-9]+) ").code | tonumber) else null end),
-         started: $started, elapsed_min: $elapsed, idle_min: $idle,
+         started: $started, idle_min: $idle,
          busy: (if $busy then ($last_command.item.command | command_display) else "" end),
          busy_min: (if $busy then (($now - ($last_command.workhorse_time // $modified)) / $seconds_per_minute | floor | if . < 0 then 0 else . end) else 0 end),
          cmds: ($commands | length),
-         tests: ([$commands[] | select(.item.command | is_test)] | length),
-         tokens: (map(select(.type == "turn.completed") | .usage.input_tokens + .usage.output_tokens) | add // 0),
-         last_cmds: ([.[] | select(.type == "item.started" and .item.type == "command_execution") | .item.command] | .[-$last_cmds:]),
-         report: (if $state == "done" then $report else null end)}' < <(jq -c -R 'fromjson? // empty' "$log")
+         tests: ([$commands[] | select(.item.command | is_test)] | length)}' < <(jq -c -R 'fromjson? // empty' "$log")
     done | jq -s '.'
     exit 0 ;;
   -l)
@@ -239,7 +234,6 @@ if (( resume )); then
   last_run="$(latest "$base")"
   session="$(cat "$last_run/session.txt" 2>/dev/null)"
   [[ -n "$session" ]] || { echo "workhorse: no session for job '$name'" >&2; exit 2; }
-  [[ -f "$last_run/lang.txt" ]] && WORKHORSE_LANG="$(cat "$last_run/lang.txt")"
   prev_mode="$(cat "$last_run/mode.txt")"
   (( dir_set )) || dir="$(cat "$last_run/dir.txt")"
   : "${mode:=$prev_mode}"
@@ -287,23 +281,12 @@ tier=default
 [[ $model == $WORKHORSE_FAST_MATCH ]] && { tier=fast; deff=high; }
 : "${effort:=$deff}"
 printf '%s\n' "$model" > "$out/model.txt"; printf '%s\n' "$effort" > "$out/effort.txt"
-printf '%s\n' "$WORKHORSE_LANG" > "$out/lang.txt"
-
-if [[ "$WORKHORSE_LANG" == en ]]; then
-  case "$mode" in
-    code) scope="You may modify files within $dir." ;;
-    review) scope="Read-only: do not modify any files; provide only conclusions and evidence." ;;
-    ops) scope="You may access files outside the repository and other machines (deployment, remote execution, etc.), only as required by the task." ;;
-  esac
-  follow_up="The preceding action_safety, verification_loop, default_follow_through_policy, and compact_output_contract rules remain in effect."
-else
-  case "$mode" in
-    code) scope="可以修改 $dir 内的文件。" ;;
-    review) scope="只读：不修改任何文件，只给出结论和证据。" ;;
-    ops) scope="可以访问仓库外的文件和其他机器（部署、远程运行等），限于任务所需。" ;;
-  esac
-  follow_up="前面给出的 action_safety、verification_loop、default_follow_through_policy、compact_output_contract 仍然有效。"
-fi
+case "$mode" in
+  code) scope="可以修改 $dir 内的文件。" ;;
+  review) scope="只读：不修改任何文件，只给出结论和证据。" ;;
+  ops) scope="可以访问仓库外的文件和其他机器（部署、远程运行等），限于任务所需。" ;;
+esac
+follow_up="前面给出的 action_safety、verification_loop、default_follow_through_policy、compact_output_contract 仍然有效。"
 
 script_path="${BASH_SOURCE[0]}"
 while [[ -L "$script_path" ]]; do
@@ -320,7 +303,7 @@ script_dir="$(cd "$(dirname "$script_path")" && pwd)"
   if [[ "$mode" == "$prev_mode" ]]; then
     printf '\n%s\n' "$follow_up"
   else
-    blocks="$(< "$script_dir/../prompts/blocks.$WORKHORSE_LANG.md")"
+    blocks="$(< "$script_dir/../prompts/blocks.md")"
     if [[ -z "$WORKHORSE_SKIP_SKILLS" ]]; then
       blocks="$(printf '%s\n' "$blocks" | sed '/{{SKIP_SKILLS}}/d')"
     else
