@@ -88,6 +88,11 @@ async function poll($: EngineInterface, options: PluginOptions) {
 }
 
 export const register: Register = (on, options) => {
+  on('agent.offer', ($, e, next) => {
+    if (options.hide_codex_rescue && e.agent === 'codex:codex-rescue') return { isOffered: false }
+    return next(e)
+  })
+
   on('session.start', async ($, e, next) => {
     await $.tool.register({
       name: 'cx',

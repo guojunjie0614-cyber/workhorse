@@ -2,6 +2,16 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import { argv, brief } from './lib'
 
+test('hides codex-rescue and passes other agents through', async ($, on) => {
+  const offered: string[] = []
+  on('agent.offer', ($, e) => { offered.push(e.agent); return { isOffered: true } })
+  for (const agent of ['codex:codex-rescue', 'codex:other', 'other:codex-rescue', 'Explore']) {
+    const result = await $.agent.offer({ agent, description: '', source: 'plugin', provider: { plugin: 'codex', tier: 'user' } })
+    expect(result).toEqual({ isOffered: agent !== 'codex:codex-rescue' })
+  }
+  expect(offered).toEqual(['codex:other', 'other:codex-rescue', 'Explore'])
+})
+
 function setup(on: On) {
   const store: Record<string, unknown> = {}
   on('store.get', ($, e) => ({ value: store[e.key] }))
