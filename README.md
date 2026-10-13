@@ -148,3 +148,7 @@ claude plugin test
 ```
 
 测试在 `hooks/workhorse.test.ts`，使用 Claude Code 自带的 mod 测试工具（模拟 store、时钟和进程调用），不消耗 token。
+
+## 许可证
+
+[MIT](LICENSE)

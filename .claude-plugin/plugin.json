@@ -5,6 +5,7 @@
   "author": { "name": "mac_max" },
   "homepage": "https://github.com/guojunjie0614-cyber/workhorse",
   "repository": "https://github.com/guojunjie0614-cyber/workhorse",
+  "license": "MIT",
   "userConfig": {
     "hide_codex_rescue": { "type": "boolean", "title": "Hide Codex rescue agent", "default": true, "description": "Hide codex:codex-rescue from Claude to avoid competing with workhorse delegation" },
     "model_code": { "type": "string", "title": "Code model", "default": "", "description": "Code model" },
