@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Offline stand-in for `codex exec [resume]`: swallows stdin, writes "done" to the -o file,
+# and replays tests/fixtures/events.jsonl as JSONL on stdout (with --json) or a text log otherwise.
+here="$(cd "$(dirname "$0")/.." && pwd)"
+out="" json=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output-last-message) out="$2"; shift 2 ;;
+    --json) json=1; shift ;;
+    *) shift ;;
+  esac
+done
+cat > /dev/null
+[[ -n "$out" ]] && echo done > "$out"
+if (( json )); then cat "$here/fixtures/events.jsonl"
+else printf 'session id: 01a1330a-d704-7e43-8177-ccc8441338d4\nexec\n/bin/zsh -lc ls\nexec\n/bin/zsh -lc pytest\ntokens used\n42667\n'; fi

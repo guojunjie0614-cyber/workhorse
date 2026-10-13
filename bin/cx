@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# cx: hand a task to Codex like a subagent. The task text comes on stdin; the short report goes to stdout.
+#   cx [-C dir | -w name] [-n name] [--code|--review|--ops] [-m model] [-e effort] <<'EOF' ... EOF   new job
+#   cx -r [name] [--code] <<'EOF' ... EOF    follow-up in the same Codex thread (default: last job; --code turns a review into a fix)
+#   cx -l | cx -t [name] | cx -k [name]      list jobs | what a job is doing | stop a job
+#   cx --clean name                          remove the worktree and branch that `-w name` created
+set -uo pipefail
+
+root="${CX_HOME:-$HOME/.cache/cx}"
+mkdir -p "$root"
+find "$root" -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} + 2>/dev/null
+dir="$PWD" name="" mode="" resume=0 model="" effort="" dir_set=0 wt=""
+newest() { ls -t "$root" | grep -v '^LAST$' | head -1; }
+alive() { [[ -f "$1/pid" ]] && kill -0 "$(cat "$1/pid")" 2>/dev/null; }
+tree() { local c; for c in $(pgrep -P "$1"); do tree "$c"; done; echo "$1"; }
+# Snapshot the whole working tree (untracked files included) through a throwaway index; the real index is untouched.
+snap() { local idx; idx="$(mktemp)"; rm -f "$idx"
+  GIT_INDEX_FILE="$idx" git -C "$1" add -A :/ 2>/dev/null && GIT_INDEX_FILE="$idx" git -C "$1" write-tree; rm -f "$idx"; }
+TESTS='pytest|py\.test|unittest|(npm|pnpm|yarn|bun) (run )?test|vitest|jest|go test|cargo test|ctest|make (check|test)|tox|nox|rspec'
+
+case "${1:-}" in
+  -l)
+    for d in $(ls -t "$root" | grep -v '^LAST$' | head -20); do
+      j="$root/$d"
+      if [[ -f "$j/report.txt" ]]; then st="$(head -1 "$j/report.txt" | cut -d' ' -f3-)"
+      elif alive "$j"; then st="running $(( ($(date +%s) - $(stat -f %B "$j/codex.log")) / 60 ))min"
+      else st="dead (no report)"; fi
+      printf '%-30s %s\n' "$d" "$st"
+    done; exit 0 ;;
+  -t)
+    j="$root/${2:-$(newest)}"
+    grep -E '^/bin/zsh -lc' "$j/codex.log" | tail -n 8 | cut -c1-200
+    now=$(date +%s)
+    echo "-- $(grep -c '^exec$' "$j/codex.log") commands, $(grep -E '^/bin/zsh -lc' "$j/codex.log" | grep -cE "$TESTS") test runs," \
+         "$(( (now - $(stat -f %B "$j/codex.log")) / 60 ))min elapsed," \
+         "last output $(( (now - $(stat -f %m "$j/codex.log")) / 60 ))min ago$(alive "$j" || echo ', not running')"; exit 0 ;;
+  -k)
+    j="$root/${2:-$(newest)}"
+    alive "$j" || { echo "not running"; exit 0; }
+    kill -TERM $(tree "$(cat "$j/pid")") 2>/dev/null; echo "stopped $(basename "$j")"; exit 0 ;;
+  --clean)
+    j="$root/${2:?usage: cx --clean name}"; w="$(cat "$j/worktree.txt" 2>/dev/null)"
+    [[ -n "$w" ]] || { echo "cx: job '$2' has no worktree" >&2; exit 2; }
+    main="$(cat "$j/repo.txt")"
+    git -C "$main" worktree remove "$w" && git -C "$main" branch -d "cx/$2"; exit $? ;;
+esac
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -C) dir="$2"; dir_set=1; shift 2 ;;
+    -w) wt="$2"; shift 2 ;;
+    -n) name="$2"; shift 2 ;;
+    -r) resume=1; [[ -n "${2:-}" && "$2" != -* ]] && { name="$2"; shift; }; shift ;;
+    --code|--review|--ops) mode="${1#--}"; shift ;;
+    -m) model="$2"; shift 2 ;;
+    -e) effort="$2"; shift 2 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+task="$(cat)"
+[[ -n "${task// }" ]] || { echo "cx: task text goes on stdin" >&2; exit 2; }
+
+session="" prev_mode=""
+if (( resume )); then
+  name="${name:-$(cat "$root/LAST" 2>/dev/null)}"; prev="$root/$name"
+  for j in "$prev" "$prev".*; do
+    [[ -d "$j" ]] && alive "$j" && { echo "cx: $(basename "$j") is still running; wait for it or cx -k it first" >&2; exit 2; }
+  done
+  session="$(cat "$prev/session.txt" 2>/dev/null)"
+  [[ -n "$session" ]] || { echo "cx: no session for job '$name'" >&2; exit 2; }
+  last_run="$(ls -dt "$prev" "$prev".* 2>/dev/null | head -1)"
+  prev_mode="$(cat "$last_run/mode.txt")"
+  (( dir_set )) || dir="$(cat "$prev/dir.txt")"
+  : "${mode:=$prev_mode}"
+  [[ "$mode" == "$prev_mode" ]] && { : "${model:=$(cat "$last_run/model.txt" 2>/dev/null)}"; : "${effort:=$(cat "$last_run/effort.txt" 2>/dev/null)}"; }
+  n=2; while [[ -d "$prev.$n" ]]; do n=$((n+1)); done
+  out="$prev.$n"
+else
+  if [[ -n "$wt" ]]; then
+    top="$(git -C "$dir" rev-parse --show-toplevel)" || exit 2
+    main="$(dirname "$(git -C "$top" rev-parse --path-format=absolute --git-common-dir)")"
+    dir="$(dirname "$main")/$(basename "$main")-$wt"
+    [[ -d "$dir" ]] || git -C "$top" worktree add -q "$dir" -b "cx/$wt" || exit 2
+    name="${name:-$wt}"
+  fi
+  dir="$(cd "$dir" && pwd)" || exit 2
+  name="${name:-$(basename "$dir")-$(date +%m%d-%H%M%S)}"
+  out="$root/$name"
+  [[ -e "$out" ]] && { echo "cx: job '$name' already exists; pick another -n or use -r" >&2; exit 2; }
+fi
+: "${mode:=code}"
+mkdir -p "$out"
+echo "$name" > "$root/LAST"
+printf '%s\n' "$dir" > "$out/dir.txt"; printf '%s\n' "$mode" > "$out/mode.txt"
+[[ -n "$wt" ]] && { printf '%s\n' "$dir" > "$out/worktree.txt"; printf '%s\n' "$main" > "$out/repo.txt"; }
+isgit=0; git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 && { isgit=1; pre="$(snap "$dir")"; }
+
+case "$mode" in
+  code)   sandbox=workspace-write;    : "${model:=gpt-6-astra}"; deff=medium
+          scope="可以修改 $dir 内的文件。" ;;
+  review) sandbox=read-only;          : "${model:=gpt-6-astra}"; deff=high
+          scope="只读：不修改任何文件，只给出结论和证据。" ;;
+  ops)    sandbox=danger-full-access; : "${model:=gpt-6.1-sol}"; deff=high
+          scope="可以访问仓库外的文件和其他机器（部署、远程运行等），限于任务所需。" ;;
+  *) echo "mode must be code|review|ops" >&2; exit 2 ;;
+esac
+# Sol always runs on the Fast tier with high reasoning (user's choice); other models keep the default tier.
+tier=default
+[[ $model == *sol* ]] && { tier=fast; deff=high; }
+: "${effort:=$deff}"
+printf '%s\n' "$model" > "$out/model.txt"; printf '%s\n' "$effort" > "$out/effort.txt"
+
+# Block layout follows OpenAI's own Codex prompting guide (codex plugin for Claude Code).
+# A follow-up in the same mode only sends the new task: the thread already has the rules.
+{
+  printf '<task>\n%s\n</task>\n' "$task"
+  if [[ "$mode" == "$prev_mode" ]]; then
+    printf '\n前面给出的 action_safety、verification_loop、default_follow_through_policy、compact_output_contract 仍然有效。\n'
+  else
+    cat <<EOF
+
+<action_safety>
+本节优先于 AGENTS.md 里关于测试、测量、验证的一般要求。$scope
+只做 task 里写的事：不顺手重构，不改无关代码，不扩大调查范围。
+写最直接的实现：不加 try/except、参数校验、fallback、兼容分支或"以防万一"的检查，除非 task 要求。
+不新增测试，除非 task 要求；要求时只加能证明这次改动的最少用例。
+不动 git 历史（不 commit/push/reset/checkout/stash），不碰凭据。临时文件放在 $out 下。
+</action_safety>
+
+<verification_loop>
+只跑 task 指定的验证命令，通过一次就停。没指定时：改了代码就只跑与改动直接相关的那一个测试文件；只读诊断不跑测试，靠读代码下结论。
+不跑全量测试，不先跑 baseline，不重复跑，不做额外的基准重跑、审计或前后对比：全量门禁由 Claude 在合并后统一跑。
+同一个失败连续两次修不好，就停下来报告。
+远程任务不要循环轮询：要等就用一条阻塞命令，否则启动后说明如何查看，然后结束。
+</verification_loop>
+
+<default_follow_through_policy>
+有歧义时取最直接、低风险的理解，继续做，在报告里用一句话说明。只有缺失信息会影响正确性或导致不可逆操作时才停下来问。
+</default_follow_through_policy>
+
+<compact_output_contract>
+中文，10 行以内：改了什么（文件:函数）或结论、为什么、验证命令和真实结果、未解决项。
+推断要标明是推断。不要表格，不贴 diff，不复述过程。
+</compact_output_contract>
+EOF
+  fi
+} > "$out/prompt.md"
+
+cfg=(-c "model=\"$model\"" -c "model_reasoning_effort=\"$effort\"" -c "service_tier=\"$tier\"" -c "sandbox_mode=\"$sandbox\""
+     -c "mcp_servers.node_repl.enabled=false" -c "notify=[]")
+[[ $sandbox == workspace-write ]] && cfg+=(-c "sandbox_workspace_write.network_access=true"
+                                          -c "sandbox_workspace_write.writable_roots=[\"$out\"]")
+
+start=$(date +%s)
+if [[ -n "$session" ]]; then
+  (cd "$dir" && exec codex exec resume "${cfg[@]}" --skip-git-repo-check -o "$out/final.md" "$session" - \
+     < "$out/prompt.md" > "$out/codex.log" 2>&1) &
+else
+  codex exec "${cfg[@]}" -C "$dir" --skip-git-repo-check -o "$out/final.md" - < "$out/prompt.md" > "$out/codex.log" 2>&1 &
+fi
+echo $! > "$out/pid"
+wait $!; rc=$?
+rm -f "$out/pid"
+
+sid="$(grep -m1 '^session id:' "$out/codex.log" | awk '{print $3}')"
+printf '%s\n' "${sid:-$session}" > "$out/session.txt"
+{
+  echo "== $(basename "$out") exit=$rc $mode $model/$effort/$tier $(( ($(date +%s) - start + 59) / 60 ))min" \
+       "tokens=$(grep -A1 '^tokens used' "$out/codex.log" | tail -1) cmds=$(grep -c '^exec$' "$out/codex.log")" \
+       "tests=$(grep -E '^/bin/zsh -lc' "$out/codex.log" | grep -cE "$TESTS")"
+  [[ -n "$session" && -n "$sid" && "$sid" != "$session" ]] && echo "!! resume started a new thread; context did not carry over"
+  (( rc )) && tail -n 20 "$out/codex.log"
+  cat "$out/final.md" 2>/dev/null; echo
+  if (( isgit )) && [[ -n "$pre" ]]; then
+    post="$(snap "$dir")"
+    if [[ "$pre" == "$post" ]]; then echo "(no file changes)"
+    else git -C "$dir" diff --stat "$pre" "$post" | tail -n 15; fi
+    [[ -n "$wt" ]] && echo "worktree: $dir (branch cx/$wt)"
+  fi
+} | tee "$out/report.txt"
+exit "$rc"

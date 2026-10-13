@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"01a1330a-d704-7e43-8177-ccc8441338d4"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"我会运行这两个命令。\n"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc ls","aggregated_output":"a.txt\nevents.jsonl\nstderr.txt\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc 'cat a.txt'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc 'cat a.txt'","aggregated_output":"hi\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"done"}}
+{"type":"turn.completed","usage":{"input_tokens":42601,"cached_input_tokens":20992,"cache_write_input_tokens":0,"output_tokens":66,"reasoning_output_tokens":0}}
