@@ -139,6 +139,7 @@ if (( resume )); then
   session="$(cat "$prev/session.txt" 2>/dev/null)"
   [[ -n "$session" ]] || { echo "workhorse: no session for job '$name'" >&2; exit 2; }
   last_run="$(ls -dt "$prev" "$prev".* 2>/dev/null | head -1)"
+  [[ -f "$last_run/lang.txt" ]] && WORKHORSE_LANG="$(cat "$last_run/lang.txt")"
   prev_mode="$(cat "$last_run/mode.txt")"
   (( dir_set )) || dir="$(cat "$prev/dir.txt")"
   : "${mode:=$prev_mode}"
@@ -177,6 +178,7 @@ tier=default
 [[ $model == $WORKHORSE_FAST_MATCH ]] && { tier=fast; deff=high; }
 : "${effort:=$deff}"
 printf '%s\n' "$model" > "$out/model.txt"; printf '%s\n' "$effort" > "$out/effort.txt"
+printf '%s\n' "$WORKHORSE_LANG" > "$out/lang.txt"
 
 if [[ "$WORKHORSE_LANG" == en ]]; then
   case "$mode" in
