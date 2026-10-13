@@ -32,10 +32,7 @@ async function openPane($: EngineInterface, options: PluginOptions) {
   return text
 }
 
-async function stopJob($: EngineInterface, options: PluginOptions, name: string) {
-  const result = await $.process.run([`${$.plugin.root}/bin/workhorse`, '-k', name], { env: environment(options) })
-  await $.ui.toast(result.stdout + result.stderr)
-}
+let ticking: { cancel: () => void } | undefined
 
 async function poll($: EngineInterface, options: PluginOptions) {
   const session = await $.session.id()
@@ -47,6 +44,8 @@ async function poll($: EngineInterface, options: PluginOptions) {
   }
   if (!owned.length) {
     statuses = []
+    ticking?.cancel()
+    ticking = undefined
     $.ui.invalidate('ui.render')
     return
   }
@@ -54,6 +53,12 @@ async function poll($: EngineInterface, options: PluginOptions) {
   const polled = JSON.parse(result.stdout) as Status[]
   statuses = polled
   $.ui.invalidate('ui.render')
+  if (polled.some(status => status.state === 'running')) {
+    ticking ??= $.clock.every(1000, () => { $.ui.invalidate('ui.render') })
+  } else {
+    ticking?.cancel()
+    ticking = undefined
+  }
   for (const [key, job] of owned) {
     try {
       const status = polled.find(s => s.name === job.name)!
@@ -128,15 +133,14 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const running = statuses.filter(status => status.state === 'running')
     if (!running.length) return next(e)
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const now = await $.clock.now()
+    const { Box, Text } = $.ui.resolve(e)
     return Box({ flexDirection: 'column', children: running.map(status => Box({
       flexDirection: 'row', gap: 1, children: [
-        Text({ color: status.idle_min >= Number(options.stall_minutes) || status.tests > Number(options.max_tests) ? 'error' : 'text', children: statusLine(status) }),
-        Button({ key: `logs:${status.name}`, label: '日志', onPress: () => {} }),
-        Button({ key: `stop:${status.name}`, label: '停止', onPress: () => {} }),
+        Text({ color: status.idle_min >= Number(options.stall_minutes) || status.tests > Number(options.max_tests) ? 'error' : 'text', children: statusLine(status, now) }),
       ],
     })) })
   })
@@ -148,7 +152,6 @@ export const register: Register = (on, options) => {
       ...recentJobs.map(job => Button({ key: `select:${job.name}`, label: `${job.name === selectedJob ? '▸ ' : ''}${job.label}`, onPress: () => {} })),
       Box({ flexDirection: 'row', gap: 1, children: [
         Button({ key: 'refresh', label: '刷新', onPress: () => {} }),
-        ...(selectedJob ? [Button({ key: `stop:${selectedJob}`, label: '停止', onPress: () => {} })] : []),
       ] }),
       Text({ color: 'text', bold: true, children: selectedJob }),
       Text({ color: 'text', children: jobOutput }),
@@ -162,15 +165,9 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.press', { plugin: 'workhorse' }, async ($, e, next) => {
-    if (e.element.startsWith('logs:')) {
-      selectedJob = e.element.slice(5)
-      await openPane($, options)
-    } else if (e.element.startsWith('select:')) {
+    if (e.element.startsWith('select:')) {
       selectedJob = e.element.slice(7)
       await refreshPane($, options)
-    } else if (e.element.startsWith('stop:')) {
-      await stopJob($, options, e.element.slice(5))
-      if (e.component === 'Pane') await refreshPane($, options)
     } else if (e.element === 'refresh') {
       await refreshPane($, options)
     } else {
@@ -193,6 +190,7 @@ export const register: Register = (on, options) => {
     if (result.exitCode !== 0) return { result: result.stderr }
     const job = started(result.stdout)
     await $.store.set(`job:${job.path}`, { name: job.name, session: await $.session.id(), goal: input.goal, doneWhen: input.done_when, warnedStall: false, warnedTests: false })
+    void poll($, options)
     return { result: `started ${job.name}; 报告会以 workhorse 消息送达，不要轮询。` }
   })
 

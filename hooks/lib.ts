@@ -30,6 +30,7 @@ export type Status = {
   path: string
   state: 'running' | 'done' | 'dead' | 'missing'
   exit: number | null
+  started: number
   elapsed_min: number
   idle_min: number
   cmds: number
@@ -42,8 +43,13 @@ export function jobRows(output: string): { name: string; label: string }[] {
   return output.split('\n').filter(line => line.trim()).map(line => ({ name: line.trim().split(/\s+/)[0]!, label: line.trim() }))
 }
 
-export function statusLine(status: Status): string {
-  return `${status.name} · ${status.mode} · ${status.elapsed_min}m · cmds ${status.cmds} · tests ${status.tests} · idle ${status.idle_min}m`
+export function statusLine(status: Status, now: number): string {
+  const seconds = Math.floor(now / 1000 - status.started)
+  const minutes = Math.floor(seconds / 60)
+  const elapsed = seconds < 60 ? `${seconds}s`
+    : minutes < 60 ? `${minutes}m${String(seconds % 60).padStart(2, '0')}s`
+      : `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, '0')}m`
+  return `${status.name} · ${status.mode} · ${elapsed} · cmds ${status.cmds} · tests ${status.tests} · idle ${status.idle_min}m`
 }
 
 export function toolLine(input: Input): string {
