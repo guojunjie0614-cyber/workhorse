@@ -42,9 +42,9 @@ test('running band refreshes elapsed seconds without stop or logs buttons', asyn
   const ui = await $.ui.mount({ plugin: 'workhorse', component: 'AbovePrompt', surface: 'terminal', requestId: 'band', props: {
     hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {},
   } })
-  expect(await ui.find({ type: 'Text', text: ' · 30s' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '  30s' })).toBeDefined()
   await clock.advance(35000)
-  expect(await ui.find({ type: 'Text', text: ' · 1m05s' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '  1m05s' })).toBeDefined()
   expect(await ui.find({ type: 'Button' })).toBeUndefined()
   expect(calls).toHaveLength(2)
   await ui.unmount()
